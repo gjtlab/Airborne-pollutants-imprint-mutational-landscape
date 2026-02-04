@@ -1,0 +1,2341 @@
+---
+  title: "Airborne pollutants imprint mutational landscape and predict cancer risk in 12,637 pregnant women"
+author: "JTGuo"
+date: "2025-12-28"
+output: html_document
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# pm2.5 and signature
+
+## Figure 2
+  
+```{r}
+pm = read.table(paste0(path, "/vcfs_somatic_SBS.rmSNP150.rmChinaMap.txt"), header=T,sep="\t", stringsAsFactor=F)
+rownames(pm) = pm[,1]
+pm[, 1]=NULL
+pm = t(pm)
+
+pm1 = read.table(paste0(path, "/cancers_vcfs_somatic_SBS.rmSNP150.rmChinaMap.txt"), header=T,sep="\t", stringsAsFactor=F)
+rownames(pm1) = pm1[,1]
+pm1[,1]=NULL
+pm1 = t(pm1)
+
+p_96_signature_all = rbind(reshape2::melt(as.matrix(colSums(pm))),
+            reshape2::melt(as.matrix(colSums(pm1)))) %>% 
+    mutate(alteration = sub("([ACGTN])(\\[)(.+)(\\])([ACGTN])", "\\3", Var1)) %>%
+    ggplot() + geom_bar(aes(x = Var1, y = value, fill = alteration),
+                        stat = "identity", position = "identity") +
+    xlab("Tri-nucleotide Sequence Motifs") + ylab("Mutaion Counts") +
+    facet_grid(. ~ alteration, scales = "free", switch = "y") +
+    scale_fill_manual(values = alpha(c("Sky Blue","black", "firebrick3", 
+                                       "gray","lightgreen", "lightpink"))) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 6),
+          axis.text.y = element_text(hjust = 0.5),
+          panel.background = element_blank(),
+          axis.ticks.x = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.position = "none",
+          panel.spacing.y = unit(1, "lines"),
+          plot.margin=unit(c(0.5,0.5,0.5,0.5), "lines"))
+
+######
+tumor_ICD = c("C73","D06","C18","C50","C34","C16","C22","C56","C07","C08","C11","C15","C20","C24","C45","C53","C54","C57","C76","C77","C85","C94","C95","D05")
+
+cancer_Num = reshape2::melt(mat[mat$cancer != "Healthy", tumor_ICD]) %>% group_by(variable) %>% summarise(value = sum(value)) %>% arrange(value)
+cancer_Num$variable = factor(cancer_Num$variable, levels = cancer_Num$variable)
+
+p_cancer_num = ggplot(cancer_Num) + geom_col(aes(variable, value)) +
+   labs(y="Counts", x = "") +
+   scale_y_sqrt() + theme_bw() +
+   theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust=0.5),
+         axis.text.y = element_text(angle = 0, hjust = 1, vjust = 0.5)) +
+   coord_flip()
+
+
+###########
+snv_icd_list <- expand.grid(
+  snv = c("Total_SMs", "Total_SNVs", "Total_InDels", "TMB_NonSyn_SMs", "NonSyn_SNVs", "NonSyn_InDels", 
+          "C_A", "C_T", "C_G", "T_A", "T_C", "T_G", grep("SBS", colnames(mat), v = T)),
+  icd = names(which(colSums(mat[,colnames(mat)[67:685]]) > 3)),
+  stringsAsFactors = FALSE
+  )
+
+res_icd_sbs = mclapply(1:nrow(snv_icd_list), function(x){
+  message(x)
+  dat = cbind(mat[, c(snv_icd_list$snv[x], "age", "preg_week", "PREFACE")], icd = mat[, snv_icd_list$icd[x]])
+  dat[,1] = scale(dat[,1])
+  fit = glm(icd ~ ., data = dat, family = binomial)
+  coefs = coef(summary(fit))
+  ci <- confint(fit)
+  res = as.data.frame(cbind(coefs, ci))
+  colnames(res) = c("Estimate", "StdError", "Zvalue", "Pvalue", "CI_lower", "CI_upper")
+  res$var = rownames(res)
+  res$icd = snv_icd_list$icd[x]
+  return(res[snv_icd_list$snv[x], ])
+  }, mc.cores = 30)
+
+res_icd_sbs = do.call(rbind, res_icd_sbs)
+rownames(res_icd_sbs) = NULL
+res_icd_sbs = res_icd_sbs %>% group_by(icd) %>% mutate(fdr = p.adjust(Pvalue, method = "fdr"))
+
+write.table(res_icd_sbs, file = paste0(path, "/tableS6_ICD_vs_sbs.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+icd_shows_all = res_icd_sbs %>% filter(fdr<0.05) %>% group_by(icd) %>% summarise(n = n()) %>% arrange(n) %>% pull(icd)
+var_shows = intersect(colnames(mat), res_icd_sbs$var[res_icd_sbs$fdr < 0.05])
+
+icd_mat_all = lapply(icd_shows_all, function(x){
+  m = reshape2::melt(mat[mat[[x]] == 1 , c("ID", var_shows)])
+  m$icd = x
+  return(m)
+})
+icd_mat_all = do.call(rbind, icd_mat_all)
+icd_mat_all$icd = factor(icd_mat_all$icd, levels = rev(icd_shows_all))
+
+p_icd_tmb_boxplot_all = icd_mat_all %>% filter(!grepl("SBS", variable)) %>% group_by(variable) %>% 
+  mutate(value = as.numeric(scale(value))) %>%
+  ggplot() + geom_boxplot(aes(variable, value, fill = variable, color = variable), outliers = F) + 
+  facet_wrap(~icd, scales = "fixed") +
+  labs(x = "", y = "Scaled somatic burden") +
+  scale_fill_manual(values = alpha(c("gold", "darkorchid", "orange", "darkcyan", "deeppink", "limegreen",
+                                     "Sky Blue","black", "firebrick3", 
+                                     "gray","lightgreen", "lightpink"))) +
+  scale_color_manual(values = alpha(c("gold", "darkorchid", "orange", "darkcyan", "deeppink", "limegreen",
+                                      "Sky Blue","black", "firebrick3", 
+                                      "gray","lightgreen", "lightpink"))) +
+  guides(color = "none", fill = guide_legend(ncol = 2, title = "Variant type")) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid = element_blank(),
+        panel.spacing.x = unit(0, "lines"))
+
+# pdf("p_icd_tmb_boxplot_all.pdf", width = 20, height = 20)
+# p_icd_tmb_boxplot_all
+# dev.off()
+
+icd_shows = res_icd_sbs %>% filter(fdr<0.05) %>% group_by(icd) %>% summarise(n = n()) %>% filter(n>15) %>% arrange(n) %>% pull(icd)
+var_shows = intersect(colnames(mat), res_icd_sbs$var[res_icd_sbs$fdr < 0.05])
+
+icd_mat = lapply(icd_shows, function(x){
+  m = reshape2::melt(mat[mat[[x]] == 1 , c("ID", var_shows)])
+  m$icd = x
+  return(m)
+})
+icd_mat = do.call(rbind, icd_mat)
+icd_mat$icd = factor(icd_mat$icd, levels = rev(icd_shows))
+
+p_icd_tmb_boxplot = icd_mat %>% filter(!grepl("SBS", variable)) %>% group_by(variable) %>% 
+  mutate(value = as.numeric(scale(value))) %>%
+  ggplot() + geom_boxplot(aes(variable, value, fill = variable, color = variable), outliers = F) + 
+    facet_grid(~icd, scales = "free") +
+    labs(x = "", y = "Scaled somatic burden") +
+    scale_fill_manual(values = alpha(c("gold", "darkorchid", "orange", "darkcyan", "deeppink", "limegreen",
+                                       "Sky Blue","black", "firebrick3", 
+                                       "gray","lightgreen", "lightpink"))) +
+    scale_color_manual(values = alpha(c("gold", "darkorchid", "orange", "darkcyan", "deeppink", "limegreen",
+                                        "Sky Blue","black", "firebrick3", 
+                                       "gray","lightgreen", "lightpink"))) +
+    guides(color = "none", fill = guide_legend(ncol = 2, title = "Variant type")) +
+    theme_bw() +
+    theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid = element_blank(),
+        panel.spacing.x = unit(0, "lines"))
+
+p_icd_sbs_heatmap = res_icd_sbs %>% filter(fdr<0.05, icd %in% icd_shows) %>% 
+    mutate(
+        icd = factor(icd, levels = icd_shows),
+        var = factor(var, levels = var_shows),
+        Estimate2 = sign(Estimate) * sqrt(abs(Estimate))  # 对 Estimate 做缩放
+    ) %>%
+    ggplot(aes(var, icd, fill = Estimate2, size = -log10(Pvalue))) +
+    geom_point(aes(color = Estimate2), shape = 21) +
+    #scale_fill_scico(palette = "vik", midpoint = 0, name = "Scaled Estimate") +
+    #scale_color_scico(palette = "vik", midpoint = 0, name = "Scaled Estimate") +
+    scale_fill_gradient2(low="blue", mid = "white", high = "red", midpoint = 0, name = "Scaled Estimate") +
+    scale_color_gradient2(low="blue", mid = "white", high = "red", midpoint = 0, name = "Scaled Estimate") +
+    scale_size(range = c(2, 6)) +
+    labs(x = "", y = "") +
+    theme_bw() +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal"
+    )
+
+p_sbs_boxplot = reshape2::melt(as.matrix(mat[, grep("SBS", colnames(mat))])) %>% filter(value > 0) %>%
+  ggplot(aes(x = Var2, y = value)) + geom_boxplot(outliers = F) +
+    labs(y = "Activate", x = "COSMIC SBS Signatures") +
+    scale_y_continuous(expand=c(0,0)) +
+    scale_y_sqrt() +
+    theme_bw() +
+    theme(axis.text.x = element_text(hjust = 1, size = 10, angle = 60),
+        axis.text.y = element_text(size = 10),
+        axis.title = element_text(size = 10 * 1.2),
+        panel.background = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        legend.title=element_blank(),
+        legend.position="top",
+        legend.justification = "center",
+        legend.text=element_text(size = 10))
+
+pdf(paste0(path, "/Figure2.pdf"), width = 11, height = 6)
+plot_grid(
+  plot_grid(p_96_signature_all, p_icd_tmb_boxplot + theme(legend.position = "none"), p_sbs_boxplot, 
+            ncol = 1, labels = c("A", "B", "D"), align = "v"),
+  plot_grid(get_legend(p_icd_tmb_boxplot), p_cancer_num,
+            ncol = 1, rel_heights = c(0.6, 1), labels = c("", "C"), align = "v"),
+  nrow = 1, rel_widths = c(8, 2))
+dev.off()
+```
+
+## Figure 3
+
+```{r}
+p_icd_age_week = rbind(
+  PREFACE_somatic %>% filter(lmP < 0.05) %>% mutate(icd = "FF", var = feature, Pvalue = lmP, Estimate = lmP) %>% select(Estimate, var, icd, Pvalue),
+  preg_week_somatic %>% filter(lmP < 0.05) %>% mutate(icd = "Week", var = feature, Pvalue = lmP, Estimate = lmP) %>% select(Estimate, var, icd, Pvalue),
+  age_somatic %>% filter(lmP < 0.05) %>% mutate(icd = "Age", var = feature, Pvalue = lmP, Estimate = lmP) %>% select(Estimate, var, icd, Pvalue),
+  res_icd_sbs %>% filter(fdr<0.05, icd %in% icd_shows) %>% select(Estimate, var, icd, Pvalue)) %>%
+    filter(var %in% var_shows) %>%
+    mutate(
+        icd = factor(icd, levels = c(icd_shows, "FF","Week", "Age")),
+        var = factor(var, levels = var_shows),
+        Estimate2 = sign(Estimate) * sqrt(abs(Estimate))  # Scaled beta
+    ) %>%
+  ggplot(aes(var, icd, fill = Estimate, size = -log10(Pvalue))) +
+    geom_point(aes(color = Estimate), shape = 21) +
+    scale_fill_scico(palette = "vikO", midpoint = 0, name = "Beta") +
+    scale_color_scico(palette = "vikO", midpoint = 0, name = "Bata") +
+    # scale_fill_gradient2(low="blue", mid = "white", high = "red", midpoint = 0, name = "Scaled beta") +
+    # scale_color_gradient2(low="blue", mid = "white", high = "red", midpoint = 0, name = "Scaled beta") +
+    scale_size(range = c(2, 6)) +
+    guides(color = "none", 
+           fill = guide_colorbar(
+           title = "Beta",
+           barwidth = 10,
+           barheight = 0.5)) +
+    labs(x = "", y = "") +
+    theme_bw() +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal"
+    )
+
+p_icd_sbs_bar = res_icd_sbs %>% filter(fdr < 0.05) %>% group_by(icd) %>% summarise(n = n()) %>% 
+  filter(n > 15) %>% arrange(n) %>% add_row(icd=c("FF", "Week", "Age"),  n=c(27, 6, 8)) %>%
+  mutate(icd = factor(icd, levels = icd)) %>%
+  ggplot(aes(x = icd, y = n)) + geom_col() + coord_flip() +
+  labs(x = "", y = "Counts") +
+  theme_classic() +
+  theme(legend.position = "none",
+        axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),
+        panel.grid = element_blank())
+
+
+
+plot_96_scatter = function(pm, pm1){
+  dat = as.data.frame(reshape2::melt(as.matrix(colSums(pm))))
+  colnames(dat)[3] = "Healthy"
+  dat = cbind(dat, Tumor = reshape2::melt(as.matrix(colSums(pm1)))$value)
+  dat$Healthy_mean = dat$Healthy/nrow(pm)
+  dat$Tumor_mean = dat$Tumor/nrow(pm1)
+  dat$Healthy_mean_frq = dat$Healthy_mean/sum(dat$Healthy_mean)
+  dat$Tumor_mean_frq = dat$Tumor_mean/sum(dat$Tumor_mean)
+  dat$type = sub("([ACGTN])(\\[)(.+)(\\])([ACGTN])", "\\3", dat$Var1)
+  p = ggscatter(dat, x="Healthy_mean_frq", y="Tumor_mean_frq", color = "type", group=1) +
+    labs(x = "Average mutaton fraction\nin healthy samples", y = "Average mutaton fraction\nin tumor samples") +
+    scale_color_manual(values = alpha(c("Sky Blue","black", "firebrick3", 
+                                        "gray","lightgreen", "lightpink"))) +
+    scale_x_sqrt(limits = c(0, 0.11), breaks = c(0.01, 0.03, 0.06, 0.09)) +
+    scale_y_sqrt(limits = c(0, 0.11), breaks = c(0.01, 0.03, 0.06, 0.09)) +
+    geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+    coord_fixed(ratio = 1) +
+    theme_bw()
+  return(p)
+}
+
+plot_96_signature = function(pm, pm1){
+  p = rbind(reshape2::melt(as.matrix(colSums(pm))) %>% mutate(group="Healthy"),
+            reshape2::melt(as.matrix(colSums(pm1))) %>% mutate(group="Tumor")) %>% 
+    mutate(alteration = sub("([ACGTN])(\\[)(.+)(\\])([ACGTN])", "\\3", Var1)) %>%
+    ggplot() + geom_bar(aes(x = Var1, y = value, fill = alteration),
+                        stat = "identity", position = "identity") +
+    xlab("Tri-nucleotide Sequence Motifs") + ylab("Mutaion Counts") +
+    facet_grid(group ~ alteration, scales = "free", switch = "y") +
+    scale_fill_manual(values = alpha(c("Sky Blue","black", "firebrick3", 
+                                       "gray","lightgreen", "lightpink"))) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 6),
+          axis.text.y = element_text(hjust = 0.5),
+          panel.background = element_blank(),
+          axis.ticks.x = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.position = "none",
+          panel.spacing.y = unit(1, "lines"),
+          plot.margin=unit(c(0.5,0.5,0.5,0.5), "lines"))
+  return(p)
+}
+
+p_96_scatter = plot_96_scatter(pm, pm1) + theme(legend.position = "none")
+p_96_signature = plot_96_signature(pm, pm1)
+
+p12 = reshape2::melt(mat[, c(grep("SBS", colnames(mat), v=T), "group")]) %>% group_by(group, variable) %>% 
+  mutate(group = factor(group, levels = c("Healthy", "Tumor"))) %>%
+  ggbarplot(x = "variable", y = "value", fill = "group", add = "mean",
+            position = position_dodge())+
+  stat_compare_means(aes(group = group), label = "p.signif", label.y.npc = 0.9) +
+  labs(y="The average activity", fill="") +
+  scale_fill_d3() +
+  scale_y_sqrt(expand = c(0, 0), limits = c(0, 0.4)) +
+  theme_bw() +
+  theme(
+    legend.position = c(0.2, 0.6),
+    legend.background = element_blank(),
+    legend.direction = "horizontal",
+    axis.title.x = element_blank(),
+    axis.title.y=element_text(colour='black', size=12),
+    axis.text.y = element_text(colour='black',size=12),
+    axis.text.x = element_text(colour='black',size=12, angle = 90, hjust = 1, vjust = 0.5),
+    axis.ticks.x = element_blank(),
+    axis.line.y = element_line(colour = "black"),
+    panel.background = element_rect(fill = 'transparent'),
+    panel.grid = element_blank(),
+    panel.border = element_blank())
+
+pdf(paste0(path, "/Figure3.pdf"), width = 11, height = 10)
+plot_grid(
+  plot_grid(p_icd_age_week, p_icd_sbs_bar, nrow = 1, rel_widths = c(8, 2), align = "h"),
+  plot_grid(p_96_signature, p_96_scatter, ncol = 2, rel_widths = c(4.6, 1.4), labels = c("B", "C"),
+            label_size = 15),
+  p12, 
+  ncol = 1, rel_heights = c(1.2, 0.8, 0.8), labels = c("A", "", "D"), label_size = 15)
+dev.off()
+```
+
+## Figure S1
+
+```{r}
+library(GGally)
+aqi = c("PM2.5", "PM10", "CO", "SO2", "NO2", "O3_8h")
+expo = mat[, paste(aqi[c(1, 2, 5, 6)], "exposure_day", sep = "_")]
+colnames(expo) = aqi[c(1, 2, 5, 6)]
+pdf(paste0(path, "/FigureS1_tumor_normal_PMexposure_signatureID.pdf"))
+fig = ggpairs(expo,  upper = list(continuous = wrap("cor",method = "spearman")),
+              diag = list(continuous = wrap("barDiag",rescale=TRUE)))      
+print(fig)
+dev.off()
+```
+
+## Figure S2
+
+```{r}
+dat01 = readRDS("somatic_mutation.annovar.hg38.split.rds")
+
+non_variant = c("frameshift deletion", "frameshift insertion", "nonframeshift deletion", "nonframeshift insertion", "nonsynonymous SNV", "startloss", "stopgain", "stoploss")
+
+func_counts <- dat01 %>%
+  count(Func.refGene) %>%
+  arrange(desc(n))
+
+p_Variant_func = ggplot(func_counts, aes(x = reorder(Func.refGene, n), y = n, fill = Func.refGene)) +
+  geom_bar(stat = "identity") +
+  scale_y_sqrt() +
+  coord_flip() +
+  theme_bw() +
+  labs(x = "Function", y = "Variant count", title = "Variant Functional Distribution") +
+  theme(legend.position = "none")
+
+exonic_counts <- dat01 %>% filter(ExonicFunc.refGene != ".") %>%
+  count(ExonicFunc.refGene) %>%
+  arrange(desc(n))
+
+p_Variant_exonic = ggplot(exonic_counts, aes(x = reorder(ExonicFunc.refGene, n), y = n, fill = ExonicFunc.refGene)) +
+  geom_bar(stat = "identity") +
+  scale_y_sqrt() +
+  coord_flip() +
+  theme_bw() +
+  labs(x = "Exonic Function", y = "Variant count", title = "Exonic Functional Distribution") +
+  theme(legend.position = "none")
+
+dat01 <- dat01 %>%
+  mutate(VariantType = case_when(
+    Ref == "-" ~ "INS",
+    Alt == "-" ~ "DEL",
+    Ref %in% c("A", "C", "G", "T") & Alt %in% c("A", "C", "G", "T") ~ "SNV"
+  ))
+
+type_counts <- dat01 %>% count(VariantType) %>% na.omit()
+
+p_Variant_type = ggplot(type_counts, aes(x = VariantType, y = n, fill = VariantType)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  scale_y_sqrt() +
+  labs(x = "Variant Type", y = "Count", title = "Variant Type Distribution") +
+  scale_fill_manual(values = c("SNV" = "#4c72b0", "INS" = "#55a868", "DEL" = "#c44e52"))
+
+type_counts1 <- as.data.frame(table(str_split(dat01$tricontext, pattern = "[\\[\\]]", simplify=T)[, 2])) %>% filter(Var1!="")
+
+p_Variant_type_1 = ggplot(type_counts1, aes(x = Var1, y = Freq, fill = Var1)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  scale_y_sqrt() +
+  labs(x = "Variant Type", y = "Count", title = "Variant Type Distribution") +
+  theme(legend.position = "none")
+
+
+dat = unique(dat01[,c(1:5,8,16)])
+
+non_variant = c("frameshift deletion", "frameshift insertion", "nonframeshift deletion", "nonframeshift insertion", "nonsynonymous SNV", "startloss", "stopgain", "stoploss")
+
+dn_ds1 <- dat %>% filter(sample %in% norm_sample) %>%
+  filter(!is.na(ExonicFunc.refGene)) %>%
+  mutate(
+    class = case_when(
+      ExonicFunc.refGene == "synonymous SNV" ~ "Synonymous",
+      ExonicFunc.refGene %in% non_variant ~ "Nonsynonymous",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(class)) %>%
+  count(class) %>%
+  tidyr::pivot_wider(
+    names_from = class,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  mutate(
+    dN_dS = Nonsynonymous / Synonymous
+  )
+
+titv1 <- dat %>% filter(sample %in% norm_sample) %>%
+  filter(
+    nchar(Ref) == 1,
+    nchar(Alt) == 1,
+    Ref %in% c("A", "C", "G", "T"),
+    Alt %in% c("A", "C", "G", "T")
+  ) %>%
+  mutate(
+    change = paste0(Ref, ">", Alt),
+    type = case_when(
+      change %in% c("A>G", "G>A", "C>T", "T>C") ~ "Ti",
+      TRUE ~ "Tv"
+    )
+  ) %>%
+  count(type) %>%
+  tidyr::pivot_wider(
+    names_from = type,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  mutate(
+    Ti_Tv = Ti / Tv
+  )
+
+
+dn_ds2 <- dat %>% filter(!(sample %in% norm_sample)) %>%
+  filter(!is.na(ExonicFunc.refGene)) %>%
+  mutate(
+    class = case_when(
+      ExonicFunc.refGene == "synonymous SNV" ~ "Synonymous",
+      ExonicFunc.refGene %in% non_variant ~ "Nonsynonymous",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(class)) %>%
+  count(class) %>%
+  tidyr::pivot_wider(
+    names_from = class,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  mutate(
+    dN_dS = Nonsynonymous / Synonymous
+  )
+
+titv2 <- dat %>% filter(!(sample %in% norm_sample)) %>%
+  filter(
+    nchar(Ref) == 1,
+    nchar(Alt) == 1,
+    Ref %in% c("A", "C", "G", "T"),
+    Alt %in% c("A", "C", "G", "T")
+  ) %>%
+  mutate(
+    change = paste0(Ref, ">", Alt),
+    type = case_when(
+      change %in% c("A>G", "G>A", "C>T", "T>C") ~ "Ti",
+      TRUE ~ "Tv"
+    )
+  ) %>%
+  count(type) %>%
+  tidyr::pivot_wider(
+    names_from = type,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  mutate(
+    Ti_Tv = Ti / Tv
+  )
+
+
+library(dplyr)
+library(ggplot2)
+
+df_titv = rbind(reshape2::melt(titv1) %>% mutate(group = "healthy"),
+ reshape2::melt(titv2) %>% mutate(group = "cancer"))
+
+df_titv_prop <- df_titv %>%
+  filter(variable %in% c("Ti", "Tv")) %>%
+  group_by(group) %>%
+  mutate(
+    prop = value / sum(value)
+  )
+
+df_titv_label <- df_titv %>%
+  filter(variable == "Ti_Tv") %>%
+  mutate(
+    label = paste0("Ti/Tv = ", round(value, 2)),
+    y = 1.05   # 放在柱子正上方
+  )
+
+p_titv = ggplot(df_titv_prop, aes(x = group, y = prop, fill = variable)) +
+  geom_col(width = 0.7) +
+  geom_text(
+    data = df_titv_label,
+    aes(x = group, y = y, label = label),
+    inherit.aes = FALSE,
+    size = 4
+  ) +
+  scale_y_continuous(
+    labels = scales::percent,
+    limits = c(0, 1.1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  scale_fill_manual(
+  values = c(
+    "Ti" = "#4DBBD5",
+    "Tv" = "#E64B35"
+  )
+)+
+  labs(
+    x = NULL,
+    y = "Proportion of mutations",
+    fill = NULL
+  ) +
+  theme_bw(base_size = 14)
+
+
+
+df_dnds = rbind(reshape2::melt(dn_ds1) %>% mutate(group = "healthy"),
+ reshape2::melt(dn_ds2) %>% mutate(group = "cancer"))
+ 
+df_dnds_prop <- df_dnds %>%
+  filter(variable %in% c("Nonsynonymous", "Synonymous")) %>%
+  group_by(group) %>%
+  mutate(
+    prop = value / sum(value)
+  )
+
+df_dnds_label <- df_dnds %>%
+  filter(variable == "dN_dS") %>%
+  mutate(
+    label = paste0("dN/dS = ", round(value, 2)),
+    y = 1.05)
+
+p_dnds = ggplot(df_dnds_prop, aes(x = group, y = prop, fill = variable)) +
+  geom_col(width = 0.7) +
+  geom_text(
+    data = df_dnds_label,
+    aes(x = group, y = y, label = label),
+    inherit.aes = FALSE,
+    size = 4
+  ) +
+  scale_y_continuous(
+    labels = scales::percent,
+    limits = c(0, 1.1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  scale_fill_manual(
+  values = c(
+    "Synonymous" = "#4DBBD5",
+    "Nonsynonymous" = "#E64B35"
+  )
+)+
+  labs(
+    x = NULL,
+    y = "Proportion of mutations",
+    fill = NULL
+  ) +
+  theme_bw(base_size = 14)
+
+pdf(paste0(path, "/FigureS2_variant_count.pdf"), width = 15, height = 15)
+plot_grid(p_Variant_type, p_Variant_type_1, p_Variant_func, p_Variant_exonic, p_titv, p_dnds, ncol = 2, align = "hv")
+dev.off()
+```
+
+## Figure S3
+
+```{r}
+## 年龄
+library(ggplot2)
+library(cowplot)
+p_age_somatic = lapply(c("hist", age_somatic$feature[age_somatic$lmP<0.05]), function(x){
+    if(x=="hist"){
+      return(gghistogram(mat, x="age", xlab = "Age") +
+               geom_vline(xintercept = 33,
+                          color = "blue",       # 颜色
+                          linetype = "dashed",  # 线条类型
+                          size = 1              # 线条粗细
+      ))
+    }
+    dat = mat[, c(x, "age","age_group")]
+    colnames(dat)[1] = "snv"
+    # 绘图
+    p1 = ggviolin(dat, 
+              x = "age_group", 
+              y = "snv", 
+              fill = "age_group", 
+              add = "boxplot", 
+              add.params = list(fill = "white"),
+              notch = TRUE,
+              outlier.shape = NA) +  # 去除异常值标记（更整洁）
+      stat_compare_means(method = "wilcox.test", 
+                         label = "p.format", 
+                         label.x.npc = "center", 
+                         label.y = max(dat$snv, na.rm = TRUE) * 1.1,
+                         size = 5) +
+      labs(title = "", 
+           x = "Age", 
+           y = x) +
+      theme_bw(base_size = 14) +
+      scale_fill_d3() +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "none",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 0, hjust = 0.5)
+      )
+    return(p1)
+})
+
+pdf(paste0(path, "/FigureS3_age_somatic.all.pdf"), width = 12, height = 12)
+plot_grid(plotlist = p_age_somatic, ncol = 3, nrow = 3)
+dev.off()
+```
+
+## Figure S4
+
+```{r}
+p_pregWeek_somatic = lapply(c("hist", preg_week_somatic$feature[preg_week_somatic$lmP<0.05]), function(x){
+    if(x=="hist"){
+      return(gghistogram(mat, x="preg_week", xlab = "Gestational age") +
+               geom_vline(xintercept = median(mat$preg_week),
+                          color = "blue",       # 颜色
+                          linetype = "dashed",  # 线条类型
+                          size = 1              # 线条粗细
+      ))
+    }
+    dat = mat[, c(x, "preg_week_group")]
+    colnames(dat)[1] = "snv"
+    # 绘图
+    p1 = ggviolin(dat, 
+              x = "preg_week_group", 
+              y = "snv", 
+              fill = "preg_week_group", 
+              add = "boxplot", 
+              add.params = list(fill = "white"),
+              notch = TRUE,
+              outlier.shape = NA) +  # 去除异常值标记（更整洁）
+      stat_compare_means(method = "wilcox.test", 
+                         label = "p.format", 
+                         label.x.npc = "center", 
+                         label.y = max(dat$snv, na.rm = TRUE) * 1,
+                         size = 5) +
+      labs(title = "", 
+           x = "Gestational age", 
+           y = x) +
+      theme_bw(base_size = 14) +
+      scale_fill_d3() +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "none",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 0, hjust = 0.5)
+      )
+    return(p1)
+})
+
+pdf(paste0(path, "/FigureS4_pregWeek_somatic.all.pdf"), width = 10, height = 10)
+plot_grid(plotlist = p_pregWeek_somatic, ncol = 3, nrow = 3)
+dev.off()
+```
+
+## Figure S5
+
+```{r}
+p_PREFACE_somatic = lapply(c("hist", PREFACE_somatic$feature[PREFACE_somatic$lmP<0.05]), function(x){
+    if(x=="hist"){
+      return(gghistogram(mat, x="PREFACE", xlab = "Fetal fraction") +
+               geom_vline(xintercept = median(mat$PREFACE),
+                          color = "blue",       # 颜色
+                          linetype = "dashed",  # 线条类型
+                          size = 1              # 线条粗细
+      ))
+    }
+    dat = mat[, c(x, "PREFACE_group")]
+    colnames(dat)[1] = "snv"
+    # 绘图
+    p1 = ggviolin(dat, 
+              x = "PREFACE_group", 
+              y = "snv", 
+              fill = "PREFACE_group", 
+              add = "boxplot", 
+              add.params = list(fill = "white"),
+              notch = TRUE,
+              outlier.shape = NA) +  # 去除异常值标记（更整洁）
+      stat_compare_means(method = "wilcox.test", 
+                         label = "p.format", 
+                         label.x.npc = "center", 
+                         label.y = max(dat$snv, na.rm = TRUE) * 1,
+                         size = 5) +
+      labs(title = "", 
+           x = "Fetal fraction", 
+           y = x) +
+      theme_bw(base_size = 14) +
+      scale_fill_d3() +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "none",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 0, hjust = 0.5)
+      )
+    return(p1)
+})
+
+pdf(paste0(path, "/FigureS5_PREFACE_somatic.all.pdf"), width = 20, height = 20)
+plot_grid(plotlist = p_PREFACE_somatic, ncol = 6, nrow = 5)
+dev.off()
+```
+
+## Figure S6
+
+```{r}
+icd_shows_1 = res_icd_sbs %>% filter(fdr<0.05) %>% group_by(icd) %>% summarise(n = n()) %>% 
+  arrange(n) %>% pull(icd)
+var_shows = intersect(colnames(mat), res_icd_sbs$var[res_icd_sbs$fdr<0.05])
+
+p_icd_sbs_heatmap_1 = res_icd_sbs %>% filter(fdr<0.05, icd %in% icd_shows_1) %>% 
+    mutate(
+        icd = factor(icd, levels = icd_shows_1),
+        var = factor(var, levels = var_shows),
+        Estimate2 = sign(Estimate) * sqrt(abs(Estimate))  # 对 Estimate 做缩放
+    ) %>%
+    ggplot(aes(var, icd, fill = Estimate2, size = -log10(Pvalue))) +
+    geom_point(aes(color = Estimate2), shape = 21) +
+    #scale_fill_scico(palette = "vik", midpoint = 0, name = "Scaled Estimate") +
+    #scale_color_scico(palette = "vik", midpoint = 0, name = "Scaled Estimate") +
+    scale_fill_gradient2(low="blue", mid = "white", high = "red", midpoint = 0, name = "Scaled Estimate") +
+    scale_color_gradient2(low="blue", mid = "white", high = "red", midpoint = 0, name = "Scaled Estimate") +
+    scale_size(range = c(2, 6)) +
+    labs(x = "", y = "") +
+    theme_bw() +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank()
+    )
+
+pdf(paste0(path, "/FigureS6_icd_sbs_heatmap.pdf"), width = 14, height = 14)
+p_icd_sbs_heatmap_1
+dev.off()
+```
+
+## Figure S7
+
+```{r}
+p_icd_sbs = lapply(names(sort(table(res_icd_sbs$icd[which(res_icd_sbs$fdr < 0.05)]), decreasing = T)), function(x){
+  p = a %>% filter(icd == x, fdr < 0.05) %>%
+    ggplot(aes(x = Estimate, y = reorder(var, Estimate))) +
+      geom_point(size = 3) +
+      geom_errorbarh(aes(xmin = CI_lower, xmax = CI_upper), height = 0.3) +
+      geom_vline(xintercept = 0, linetype = "dashed", color = "darkgrey") +
+      facet_wrap(~icd, scales = "free") +
+      labs(
+        title = "GLM Coefficients with 95% CI",
+        x = "Estimate",
+        y = "",
+        color = "Significance"
+      ) +
+      theme_minimal(base_size = 14)
+  return(p)
+})
+
+pdf(paste0(path, "/FigureS7_icd_sbs_forest.pdf"))
+p_icd_sbs
+dev.off()
+```
+
+## Figure S8
+
+```{r}
+library(ggplot2)
+library(ggsci)
+
+matH = mat[mat$group=="Healthy", ]
+
+snv_lab = colnames(matH)[6:60]
+snv_label = snv_lab
+snv_label[7:12] = c("C>A", "C>T", "C>G", "T>A", "T>C", "T>G")
+names(snv_label) = snv_lab
+
+############# SNV distribution and cutoff(log2) of Non-cancer samples
+pdf(paste0(path, "/FigureS8_distribution_SNV_normalID.1.pdf"), height = 11.78, width = 11.78)
+par(las = 1, mfrow = c(3, 3), pty = "s")
+cut_load = sapply(grep("SBS", snv_lab, invert=T, v=T), function(j) {
+  cat(j,"\n")
+  load = matH[, j]
+  #if(all(vec == 0) == "TRUE") return(NA)
+  vec = log2(load + 1)
+  den = density(vec)
+  s = which(den$y == max(den$y))
+  e = length(den$y)
+  ans = rep(0, e)
+  for(i in s:(e - 1)) {
+    if(den$y[i+1] > den$y[i]) {
+      ans[i+1] = 1
+    }
+  }
+  cut = den$x[which(ans == 1)[1] - 1]
+  
+  if(j %in% c("Total_SMs", "Total_SNVs", "Total_InDels", "TMB_NonSyn_SMs", "NonSyn_SNVs", "C_A", "C_T", "C_G", "T_A", "T_C", "T_G")){
+    cut = median(vec, na.rm = T)
+  }
+  hist(load, freq = T, right = F, cex.lab = 1.3, cex.main = 2, cex.axis = 1.2, 
+       col = "lightblue", border = "black", xlab = "SNV number", main = snv_label[j])
+  hist(vec, freq = F, right = F, cex.lab = 1.3, cex.main = 2, cex.axis = 1.2, ylim = c(0, max(den$y) + 0.1), 
+       col = "lightgrey", border = "black", xlab = "Log2(snv + 1)", main = snv_label[j])
+  lines(density(vec), col = "red", lwd = 3)
+  abline(v = cut, col = "blue", lwd = 3, lty = 2)
+  qqnorm(vec, main = paste0("log2(\'", snv_label[j], "\'+1) Q-Q plot", sep = " "), cex.lab = 1.3, cex.main = 2, cex.axis = 1.2)
+  qqline(vec, col = 2, lwd = 2) 
+  cut
+})
+dev.off()
+
+write.table(cut_load, file = paste0(path, "/cut_load.tsv"), r = T, c = F, sep = "\t", quote = F)
+```
+
+## Figure 4
+
+```{r}
+library(MatchIt)
+library(backports)
+library(introdataviz)
+library(dplyr)
+library(parallel)
+
+SNV_APE_glm = lapply(c("PM2.5", "PM10", "NO2", "O3_8h"), function(x) {
+  res = mclapply(grep("SBS", snv_lab, invert = T, v = T), function(j) {
+    cat(j, "\n")
+    load = matH[, j]
+    vec = log2(load + 1)
+    cut = cut_load[j]
+    indx0 = which(vec >= cut)
+    group = rep(0, length(vec))
+    group[indx0] = 1
+    species = rep(paste("Log2(snv+1) < ", round(cut, 2), sep = ""), length(vec))
+    species[indx0] = paste("Log2(snv+1) >= ", round(cut, 2), sep = "")
+    mydata = data.frame(load = load, log2_load = vec, ID = matH$ID, age = matH$age, preg_week = matH$preg_week, PREFACE = matH$PREFACE,
+                        group = group, species = as.factor(species))
+    match.it <- matchit(group ~ age + preg_week + PREFACE, data = mydata, method = "nearest", ratio = 1)
+    df.match <- match.data(match.it)[1:ncol(mydata)]
+    pdx = match(df.match$ID, matH$ID)
+    pm.match = matH[pdx, ]
+    res = lapply(c("exposure_day"), function(y) {
+      a = paste(x, y, sep = "_")
+      cat(paste(a, j, sep = "/"), "\n")
+      load = df.match$load
+      log2_load = df.match$log2_load
+      age = df.match$age
+      gr = df.match$group
+      expo = pm.match[, a]
+      preg_week = df.match$preg_week
+      PREFACE = df.match$PREFACE
+      dfs = data.frame(gr, load, log2_load, expo, age, preg_week, PREFACE)
+      fm = glm(gr ~ scale(expo) + age + preg_week + PREFACE, family = binomial(link="logit"), data = dfs, na.action = na.omit)
+      sums = summary(fm)
+      n = nrow(dfs)
+      coes = coefficients(sums)[-1, ]
+      or = exp(coes[, 1])
+      or_low = exp(coes[, 1] - 1.96 * coes[, 2])
+      or_up = exp(coes[, 1] + 1.96 * coes[, 2])
+      pval = format(coes[, 4], digits = 3, scientific = T)
+      ans = data.frame(j, c(x, "age", "preg_week", "PREFACE"), y, cut, n, coes, or, or_low, or_up)
+      return(ans)
+    })
+    return(do.call(rbind, res))
+  }, mc.cores = 30)
+  return(do.call(rbind, res))
+})
+
+SNV_APE_glm = do.call(rbind, SNV_APE_glm)
+colnames(SNV_APE_glm) = c("load", "pollutant", "exposure", "cutoff", "sample.size", "estimate", "std.error", "z.value", "p.value", "OR", "OR_lower", "OR_upper")
+SNV_APE_glm = SNV_APE_glm[-which(SNV_APE_glm$pollutant  %in% c("age", "preg_week", "PREFACE")), ]
+SNV_APE_glm$FDR = p.adjust(SNV_APE_glm$p.value, method = "fdr")
+
+
+SNV_APE_glm_sig = SNV_APE_glm[which(SNV_APE_glm$FDR < 0.05 & SNV_APE_glm$estimate > 0), ] %>% arrange(p.value)
+SNV_APE_glm_sig$load = as.character(SNV_APE_glm_sig$load)
+SNV_APE_glm_sig$pollutant = as.character(SNV_APE_glm_sig$pollutant)
+SNV_APE_glm_sig$exposure = as.character(SNV_APE_glm_sig$exposure)
+
+dfs = mclapply(1:nrow(SNV_APE_glm_sig), function(x) {
+  print(x)
+  a = paste0(SNV_APE_glm_sig$pollutant[x], "_exposure_day")
+  j = SNV_APE_glm_sig$load[x]
+  load = matH[, j]
+  vec = log2(load + 1)
+  cut = cut_load[j]
+  indx0 = which(vec >= cut)
+  group = rep(0, length(vec))
+  group[indx0] = 1
+  species = rep(paste("Log2(snv+1) < ", round(cut, 2), sep = ""), length(vec))
+  species[indx0] = paste("Log2(snv+1) >= ", round(cut, 2), sep = "")  
+  mydata = data.frame(load = load, log2_load = vec, ID = matH$ID, age = matH$age, preg_week = matH$preg_week, PREFACE = matH$PREFACE,
+                      group = group, species = as.factor(species))
+  match.it <- matchit(group ~ age + preg_week + PREFACE, data = mydata, method = "nearest", ratio = 1)
+  
+  df.match <- match.data(match.it)[1:ncol(mydata)]
+  pdx = match(df.match$ID, matH$ID)
+  pm.match = matH[pdx, ]
+  cat(paste(a, j, sep = "/"), "\n")
+  dfs = data.frame(gr = factor(df.match$group, levels = c(0,1), labels = c("Low", "High")), load = df.match$load, expo = pm.match[, a])
+  dfs$group = j
+  dfs$fdr = paste0("FDR=", signif(SNV_APE_glm_sig$FDR[x], 3), "\nOR=", signif(SNV_APE_glm_sig$OR[x], 6))
+  return(dfs)
+}, mc.cores = 20)
+
+dfs = do.call(rbind, dfs)
+dfs$group = factor(dfs$group, 
+                   levels = c("Total_SMs", "Total_SNVs", "Total_InDels", "TMB_NonSyn_SMs", "NonSyn_SNVs", "NonSyn_InDels", "C_A", "C_T", "C_G", "T_A", "T_C", "T_G"),
+                   labels = c("Total SMs", "Total SNVs", "Total InDels", "TMB\nNonSyn_SMs", "NonSyn_SNVs", "NonSyn_InDels", "C>A", "C>T", "C>G", "T>A", "T>C", "T>G")
+                   )
+
+lab_fdr = setNames(unique(dfs[, c("fdr", "group")])$fdr, unique(dfs[, c("fdr", "group")])$group)
+
+plot_violin = function(dfs, ylab, color_index = c(1, 2), ncol = 6){
+  lab_fdr = setNames(unique(dfs[, c("fdr", "group")])$fdr, unique(dfs[, c("fdr", "group")])$group)
+  p = ggplot(dfs, aes(group, expo, fill = gr)) + geom_split_violin(trim = F, color="white", scale = "area") +
+    stat_summary(fun.data = "mean_se", geom = "pointrange", show.legend = F, size = 0.2, position = position_dodge(.175)) +
+    facet_wrap(~group, scales = "free_x", ncol = ncol, labeller = labeller(group = lab_fdr)) +
+    labs(y=ylab) +
+    scale_fill_manual(values = pal_d3("category20")(20)[color_index]) +
+    theme_cleveland() +
+    theme(legend.position="none",
+          panel.grid = element_blank(),
+          strip.background = element_blank(),
+          panel.background = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_text(size=12),
+          axis.text = element_text(size = 12),
+          strip.text = element_text(size = 12),
+          plot.title = element_text(size = 12))
+  return(p)
+}
+
+p_SNV_APE_glm_sig = plot_violin(dfs, ylab = "Ozone exposure day", color_index = c(1, 2), ncol = 6)
+
+
+fdx = sapply(grep("SBS", colnames(matH), v=T), function(x) {
+  indx = which(matH[,x] > 0)
+  length(indx) / nrow(matH)
+})
+sig_matlogit = matH[, names(which(fdx > 0.01 & fdx < 0.99))] #19
+
+sbs_APE_glm = lapply(c("PM2.5", "PM10", "NO2", "O3_8h"), function(x) {
+  res = mclapply(colnames(sig_matlogit), function(j) {
+    indx0 = which(sig_matlogit[, j] > 0)
+    species = rep("signature = 0", nrow(sig_matlogit))
+    species[indx0] = "signature > 0"
+    group = rep(0, nrow(sig_matlogit))
+    group[indx0] = 1
+    mydata = data.frame(sig = sig_matlogit[, j], ID = matH$ID, date = matH$NIPT_date, age = matH$age, PREFACE = matH$PREFACE,
+                        preg_week = matH$preg_week, group = group, species = as.factor(species))
+    match.it <- matchit(group ~ age + preg_week + PREFACE, data = mydata, method = "nearest",ratio = 1)
+    df.match <- match.data(match.it)[1:ncol(mydata)]
+    pdx = match(df.match$ID, matH$ID)
+    pm.match = matH[pdx, ]
+    res = lapply(c("exposure_day"), function(y) {
+      a = paste(x, y, sep = "_")
+      cat(paste(a, j, sep = "/"), "\n")
+      sig = df.match$sig
+      age = df.match$age
+      PREFACE = df.match$PREFACE
+      preg_week = df.match$preg_week
+      gr = df.match$group
+      #sig[which(sig != 0)] = 1
+      expo = pm.match[, a]
+      dfs = data.frame(gr, sig, expo, age, preg_week)
+      
+      fm = glm(gr ~ scale(expo) + age + preg_week + PREFACE, family = binomial(link="logit"), data = dfs, na.action = na.omit)
+      sums = summary(fm)
+      n = nrow(dfs)
+      pr = round(fdx[j], 4)
+      coes = coefficients(sums)[-1, ]
+      or = exp(coes[, 1])
+      or_low = exp(coes[, 1] - 1.96 * coes[, 2])
+      or_up = exp(coes[, 1] + 1.96 * coes[, 2])
+      pval = format(coes[, 4], digits = 3, scientific = T)
+      ans = data.frame(j, c(x, "age", "preg_week", "PREFACE"), y, pr, n, coes, or, or_low, or_up)
+      return(ans)
+    })
+    return(do.call(rbind, res))
+  }, mc.cores = 20)
+  return(do.call(rbind, res))
+})
+
+sbs_APE_glm = do.call(rbind, sbs_APE_glm)
+colnames(sbs_APE_glm) = c("signature", "pollutant", "exposure", "presence.ratio", "sample.size", "estimate", "std.error", "z.value", "p.value", "OR", "OR_lower", "OR_upper")
+sbs_APE_glm = sbs_APE_glm[-which(sbs_APE_glm$pollutant %in% c("age", "preg_week", "PREFACE")), ]
+sbs_APE_glm$FDR = p.adjust(sbs_APE_glm$p.value, method = "fdr")
+
+sbs_APE_glm_sig = sbs_APE_glm[which(sbs_APE_glm$FDR < 0.05 & sbs_APE_glm$estimate > 0), ] %>% arrange(signature)
+
+dfs_sbs = mclapply(1:nrow(sbs_APE_glm_sig), function(x) {
+  a = paste0(sbs_APE_glm_sig$pollutant[x], "_exposure_day")
+  j = sbs_APE_glm_sig$signature[x]
+  indx0 = which(sig_matlogit[, j] > 0)
+  species = rep("signature = 0", nrow(sig_matlogit))
+  species[indx0] = "signature > 0"
+  group = rep(0, nrow(sig_matlogit))
+  group[indx0] = 1
+  mydata = data.frame(sig = sig_matlogit[, j], ID = matH$ID, date = matH$NIPT_date, age = matH$age, PREFACE = matH$PREFACE,
+                      preg_week = matH$preg_week, group = group, species = as.factor(species))
+  match.it <- matchit(group ~ age + preg_week + PREFACE, data = mydata, method = "nearest", ratio = 1)
+  df.match <- match.data(match.it)[1:ncol(mydata)]
+  pdx = match(df.match$ID, matH$ID)
+  pm.match = matH[pdx, ]
+  cat(paste(a, j, sep = "/"), "\n")
+  dfs = data.frame(gr = df.match$group, sig = df.match$sig, expo = pm.match[, a], age = df.match$age, preg_week = df.match$preg_week)
+  dfs$group = j
+  dfs$pollutant = a
+  dfs$fdr = paste0("FDR=", signif(sbs_APE_glm_sig$FDR[x], 3),"\nOR=", signif(sbs_APE_glm_sig$OR[x], 6))
+  return(dfs)
+}, mc.cores = 20)
+
+dfs_sbs = do.call(rbind, dfs_sbs)
+dfs_sbs$gr = factor(dfs_sbs$gr, 
+                    levels = c(0, 1),
+                    labels = c("inactive", "active"))
+dfs_sbs$pollutant = factor(dfs_sbs$pollutant,
+                           levels = c("O3_8h_exposure_day", "PM2.5_exposure_day", "PM10_exposure_day", "NO2_exposure_day"),
+                           labels = c("Ozone exposure day", "PM2.5 exposure day", "PM10 exposure day", "NO2 exposure day"))
+dfs_sbs$group = factor(dfs_sbs$group,
+                           levels = unique(stringr::str_sort(dfs_sbs$group, numeric = T)),
+                           labels = unique(stringr::str_sort(dfs_sbs$group, numeric = T)))
+dfs_sbs = dfs_sbs %>% arrange(group)
+
+p_sbs_APE_glm_sig_O3 = plot_violin(dfs_sbs %>% filter(pollutant %in% c("Ozone exposure day"), group %in% levels(dfs_sbs$group)), 
+                                   ylab = "Ozone exposure day", color_index = c(13,14), ncol = 7)
+
+p_sbs_APE_glm_sig_PM2.5 = plot_violin(dfs_sbs %>% filter(pollutant %in% c("PM2.5 exposure day")), ylab = "PM2.5 exposure day", color_index = c(13,14), ncol = 7)
+
+p_sbs_APE_glm_sig_PM10 = plot_violin(dfs_sbs %>% filter(pollutant %in% c("PM10 exposure day")), ylab = "PM10 exposure day", color_index = c(13,14), ncol = 7)
+
+p_sbs_APE_glm_sig_NO2 = plot_violin(dfs_sbs %>% filter(pollutant %in% c("NO2 exposure day")), ylab = "NO2 exposure day", color_index = c(13,14), ncol = 7)
+
+p_legend = data.frame(y=1:4, x=c("Low", "High","Inactive","Active")) %>% mutate(x = factor(x, levels = c("Low", "High","Inactive","Active"))) %>%
+    ggplot() + geom_col(aes(x, y, fill=x)) + 
+    scale_fill_manual(values = pal_d3("category20")(20)[c(1,2,13,14)]) +
+    guides(fill = guide_legend(ncol = 2)) +
+    theme(legend.title = element_blank())
+
+
+pdf(paste0(path, "/Figure4.pdf"), width = 12, height = 12)
+plot_grid(plot_grid(plotlist = list(p_SNV_APE_glm_sig, NULL), nrow=1, labels = c("A", ""), rel_widths = c(6, 1)),
+          plot_grid(plotlist = list(p_sbs_APE_glm_sig_O3, get_legend(p_legend), NULL), nrow=1, labels = c("B", ""), rel_widths = c(3.2, 1.2, 2.6)),
+          p_sbs_APE_glm_sig_PM2.5,
+          p_sbs_APE_glm_sig_PM10,
+          p_sbs_APE_glm_sig_NO2,
+          labels = c("", "", "C", "D", "E"), ncol = 1, rel_heights = c(2, 1, 1, 1, 1)
+          )
+dev.off()
+```
+
+## table S1
+
+```{r}
+tableS1 = cbind(mat, sig_pmTN[match(mat$ID, sig_pmTN$ID),])
+tableS1 = tableS1[, grep("_mean|_med|_sd", colnames(tableS1), v=T,invert = T)]
+
+column_names = c("ID", "group", "age", "preg_week", "date","Total1", "Total_SNV1", "Total_InDel1", "TMB1", "SNVs1", "InDels1", "C_A1", "C_T1", "C_G1", "T_A1", "T_C1", "T_G1", grep("SBS", colnames(tableS1), v=T), grep("day", colnames(tableS1),v=T))
+
+tableS1 = tableS1[, column_names]
+colnames(tableS1)[5] = "NIPT_date"
+colnames(tableS1)[6:17] = c("Total_SMs", "Total_SNVs", "Total_InDels", "TMB_NonSyn_SMs", "NonSyn_SNVs", "NonSyn_InDels", "C>A", "C>T", "C>G", "T>A", "T>C", "T>G")
+
+load("~/Projects//NIPT/cohort1_somatic_mutect/pm2.5_signature_4/fq_ICD_clin.fix_NA.RData")
+
+tableS1 = read.table("Figures/tableS1.tsv", header = T, sep = "\t", stringsAsFactors = F, check.names = F)
+
+icd = mother_ICD_NIPT[match(tableS1$ID, mother_ICD_NIPT$ID), -c(1:5)]
+icd[icd>0] = 1
+icd = icd[, -grep("^(S|T|R|V|W|X|Y)", colnames(icd))]
+icd = icd[, which(colSums(icd) >= 0)]
+
+tableS1 = cbind(tableS1, icd)
+
+tumor_ICD = c("C73","D06","C18","C50","C34","C16","C22","C56","C07","C08","C11","C15","C20","C24","C45","C53","C54","C57","C76","C77","C85","C94","C95","D05")
+tumor_ICD_anno = c("Thyroid", "Uterine", "Colorectal", "Breast", "Lung", "Gastric", "Liver", "Ovarian", "Parotid_gland", "Salivary_gland", "Nasopharyngeal",
+  "Esophageal", "Colorectal", "bile_duct", "Mesothelioma", "Uterine", "Uterine", "Uterine", "Others", "Lymphoma", "Lymphoma", "Blood", "Blood", "Breast")
+
+ICD10 = read.csv("ICD10.txt", header = T, sep = "\t", comment.char = "#")
+
+cancers = reshape2::melt(cbind(icd[, tumor_ICD], tableS1$ID)) %>% filter(value > 0)
+colnames(cancers)[1] = "ID"
+cancers$ID = as.character(cancers$ID)
+cancers$type = tumor_ICD_anno[match(cancers$variable, tumor_ICD)]
+
+cancers = cancers %>% group_by(ID) %>% summarise(variable = paste(unique(variable), collapse=","), type = paste(unique(type), collapse=",")) %>% as.data.frame(stringsAsFactors=F)
+
+tableS1$cancer = cancers$type[match(tableS1$ID, cancers$ID)]
+tableS1$cancer[is.na(tableS1$cancer)] = "Healthy"
+
+write.table(tableS1, file="Figures/tableS1.tsv", r = F, c = T, sep = "\t", quote = F)
+```
+
+## table S3-S6
+
+```{r}
+library(ggpubr)
+library(cowplot)
+library(ggsci)
+library(tidyverse)
+library(parallel)
+library(ggplot2)
+library(dplyr)
+library(scico)
+library(stringr)
+
+path = "Figures_Tables_1228"
+
+mat = read.table(paste0(path, "/tableS1.tsv"), header=T,sep = "\t",stringsAsFactors = F, check.names = F)
+colnames(mat) = gsub(">", "_", colnames(mat))
+
+######
+mat$age_group = "<=33"
+mat$age_group[mat$age > 33] = ">33"
+
+age_somatic = lapply(c("Total_SMs", "Total_SNVs", "Total_InDels", "TMB_NonSyn_SMs", "NonSyn_SNVs", "NonSyn_InDels", 
+                       "C_A", "C_T", "C_G", "T_A", "T_C", "T_G", grep("SBS", colnames(mat), v = T)), 
+                     function(x){
+    pw = wilcox.test(mat[, x] ~ mat$age_group)
+    pl = summary(lm(scale(mat[, x]) ~ scale(mat$age)))
+    return(c(x, pw$p.value, pl$coef[2,c(1,4)]))
+})
+
+age_somatic = do.call(rbind, age_somatic)
+age_somatic = as.data.frame(age_somatic, stringsAsFactors=F)
+colnames(age_somatic) = c("feature", "wP", "lmEst", "lmP")
+age_somatic$wP = as.numeric(age_somatic$wP)
+age_somatic$lmEst = as.numeric(age_somatic$lmEst)
+age_somatic$lmP = as.numeric(age_somatic$lmP)
+age_somatic$icd = "Age"
+
+######
+mat$preg_week_group = ifelse(mat$preg_week > median(mat$preg_week), "High", "Low")
+
+preg_week_somatic = lapply(c("Total_SMs", "Total_SNVs", "Total_InDels", "TMB_NonSyn_SMs", "NonSyn_SNVs", "NonSyn_InDels", 
+                       "C_A", "C_T", "C_G", "T_A", "T_C", "T_G", grep("SBS", colnames(mat), v = T)),
+                       function(x){
+    pw = wilcox.test(mat[, x] ~ mat$preg_week_group)
+    pl = summary(lm(scale(mat[, x]) ~ scale(mat$preg_week)))
+    return(c(x, pw$p.value, pl$coef[2,c(1,4)]))
+})
+
+preg_week_somatic = do.call(rbind, preg_week_somatic)
+preg_week_somatic = as.data.frame(preg_week_somatic, stringsAsFactors=F)
+colnames(preg_week_somatic) = c("feature", "wP", "lmEst", "lmP")
+preg_week_somatic$wP = as.numeric(preg_week_somatic$wP)
+preg_week_somatic$lmEst = as.numeric(preg_week_somatic$lmEst)
+preg_week_somatic$lmP = as.numeric(preg_week_somatic$lmP)
+preg_week_somatic$icd = "Week"
+
+#####
+mat$PREFACE_group = ifelse(mat$PREFACE > median(mat$PREFACE), "High", "Low")
+
+PREFACE_somatic = lapply(c("Total_SMs", "Total_SNVs", "Total_InDels", "TMB_NonSyn_SMs", "NonSyn_SNVs", "NonSyn_InDels", 
+                       "C_A", "C_T", "C_G", "T_A", "T_C", "T_G", grep("SBS", colnames(mat), v = T)),
+                       function(x){
+    pw = wilcox.test(mat[, x] ~ mat$PREFACE_group)
+    pl = summary(lm(scale(mat[, x]) ~ scale(mat$PREFACE)))
+    return(c(x, pw$p.value, pl$coef[2,c(1,4)]))
+})
+
+PREFACE_somatic = do.call(rbind, PREFACE_somatic)
+PREFACE_somatic = as.data.frame(PREFACE_somatic, stringsAsFactors=F)
+colnames(PREFACE_somatic) = c("feature", "wP", "lmEst", "lmP")
+PREFACE_somatic$wP = as.numeric(PREFACE_somatic$wP)
+PREFACE_somatic$lmEst = as.numeric(PREFACE_somatic$lmEst)
+PREFACE_somatic$lmP = as.numeric(PREFACE_somatic$lmP)
+PREFACE_somatic$icd = "PREFACE"
+
+
+write.table(age_somatic, file = paste0(path, "/tableS3_age_somatic.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+write.table(preg_week_somatic, file = paste0(path, "/tableS4_preg_week_somatic.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+write.table(PREFACE_somatic, file = paste0(path, "/tableS5_PREFACE_somatic.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+write.table(res_icd_sbs, file = paste0(path, "/tableS6_ICD_vs_sbs.tsv"), r = F, c = T, sep = "\t", quote = F)
+```
+
+## table S7
+
+```{r}
+tableS7_sig = SNV_APE_glm_sig
+tableS7_sig = tableS7_sig[match(c("Total_SMs", "Total_SNVs", "Total_InDels", "TMB_NonSyn_SMs", "NonSyn_SNVs", "NonSyn_InDels", "C_A", "C_T", "C_G", "T_A", "T_C", "T_G"), tableS7_sig$load),]
+tableS7_sig$load = c("Total_SMs", "Total_SNVs", "Total_InDels", "TMB_NonSyn_SMs", "NonSyn_SNVs", "NonSyn_InDels", "C>A", "C>T", "C>G", "T>A", "T>C", "T>G")
+colnames(tableS7_sig)[1] = "variant"
+tableS7_sig$pollutant = paste(tableS7_sig$pollutant, tableS7_sig$exposure, sep = '_')
+tableS7_sig$exposure = NULL
+write.table(tableS7_sig, file=paste0(path, "/tableS7.SNV_APE_glm_sig.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+tableS7 = SNV_APE_glm
+colnames(tableS7)[1] = "variant"
+tableS7$pollutant = paste(tableS7$pollutant, tableS7$exposure, sep = '_')
+tableS7$exposure = NULL
+write.table(tableS7, file= paste0(path, "/tableS7.SNV_APE_glm.all.tsv"), r = F, c = T, sep = "\t", quote = F)
+```
+
+## table S8
+
+```{r}
+tableS8_sig = sbs_APE_glm_sig
+tableS8_sig$pollutant = paste(tableS8_sig$pollutant, tableS8_sig$exposure, sep = '_')
+tableS8_sig$exposure = NULL
+tableS8_sig$signature = factor(tableS8_sig$signature,
+       levels = unique(stringr::str_sort(tableS8_sig$signature, numeric = T)),
+       labels = unique(stringr::str_sort(tableS8_sig$signature, numeric = T)))
+tableS8_sig = tableS8_sig %>% arrange(signature)
+write.table(tableS8_sig, file = paste0(path, "/tableS8.sbs_APE_glm_sig.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+tableS8 = sbs_APE_glm
+tableS8$pollutant = paste(tableS8$pollutant, tableS8$exposure, sep = '_')
+tableS8$exposure = NULL
+tableS8$signature = factor(tableS8$signature,
+       levels = unique(stringr::str_sort(tableS8$signature, numeric = T)),
+       labels = unique(stringr::str_sort(tableS8$signature, numeric = T)))
+tableS8 = tableS8 %>% arrange(signature)
+write.table(tableS8, file = paste0(path, "/tableS8.sbs_APE_glm.all.tsv"), r = F, c = T, sep = "\t", quote = F)
+```
+
+## table S9
+
+```{r}
+library(MatchIt)
+library(ivtools)
+library(dplyr)
+
+get_group_SNV_APE_ivglm = function(mat, SNV_APE_glm_sig, PSM_method = "optimal", PSM_ratio = 100, preg_week = F, return_data = F){
+  match.it <- matchit(factor(mat$group, levels = c("Healthy", "Tumor"), labels = c(0, 1)) ~ age + preg_week + PREFACE, data = mat, method = PSM_method, ratio = PSM_ratio)
+  matM <- match.data(match.it)[1:ncol(mat)]
+  dat = matM
+  dat$group = factor(dat$group, levels = c("Healthy", "Tumor"), labels = c(0, 1))
+  dat$group = as.numeric(as.character(dat$group))
+  colnames(dat) = gsub("_exposure_day", "", colnames(dat))
+  
+  for(x in grep("SBS", snv_lab, invert = T, v = T)){
+    dat[, paste0(x, "_status")] = ifelse(log2(dat[, x] + 1) >= SNV_APE_glm$cutoff[which(SNV_APE_glm$load == x)[1]], 1, 0)
+  }
+  
+  if(return_data){
+    return(dat)
+  }
+
+  group_SNV_APE_ivglm = lapply(1:nrow(SNV_APE_glm_sig), function(x){
+    print(x)
+    # data = dat[, c(paste0(SNV_APE_glm_sig$load[x], "_status"), "PM2.5", "PM10", "NO2", "O3_8h", "group", "age", "preg_week", "PREFACE")]
+    data = dat[, c(SNV_APE_glm_sig$load[x], "PM2.5", "PM10", "NO2", "O3_8h", "group", "age", "preg_week", "PREFACE")]
+    data[,"PM"] = scale(data[, as.character(SNV_APE_glm_sig$pollutant[x])])
+    colnames(data)[1] = "load"
+    data$load = scale(data$load)
+    if(length(unique(data[,"load"])) != 1){
+      fitX.LZ <- glm(formula = load ~ PM + age + preg_week + PREFACE, family="gaussian", data=data)
+      fitY.LX <- glm(formula = group ~ load + age + preg_week + PREFACE, family="binomial", data=data)
+      fitIV <- ivglm(estmethod="ts", fitX.LZ=fitX.LZ, fitY.LX=fitY.LX, data=data, ctrl=TRUE) 
+      coef1 = as.data.frame(coef(summary(fitX.LZ)))["PM", ]
+      colnames(coef1) = c("Est_PM","SE_PM", "Zvalue_PM", "Pvalue_PM")
+      coef <- summary(fitIV)
+      coef = as.data.frame(coef$coefficients, stringsAsFactors=F)["load", ]
+      colnames(coef) = c("Est","SE", "Zvalue", "Pvalue")
+      coef = cbind(coef, coef1)
+      coef$PM = SNV_APE_glm_sig$pollutant[x]
+      coef$load = SNV_APE_glm_sig$load[x]
+      coef$type = rownames(coef)
+      return(coef)
+    }
+  })
+
+  group_SNV_APE_ivglm = do.call(rbind, group_SNV_APE_ivglm)
+  group_SNV_APE_ivglm$OR = exp(group_SNV_APE_ivglm$Est)
+  rownames(group_SNV_APE_ivglm) = NULL
+  
+  group_SNV_APE_ivglm = group_SNV_APE_ivglm %>% filter(type == "load") %>% mutate(FDR = p.adjust(Pvalue, method="fdr"))
+  return(group_SNV_APE_ivglm)
+}
+
+group_SNV_APE_ivglm = mclapply(c(1:10), function(x){
+  res = get_group_SNV_APE_ivglm(mat, SNV_APE_glm_sig, PSM_method = "optimal", PSM_ratio = x, preg_week = T)
+  res$PSM_ratio = x
+  return(res)
+}, mc.cores = 10)
+
+group_SNV_APE_ivglm = do.call(rbind, group_SNV_APE_ivglm)
+group_SNV_APE_ivglm$FDR = p.adjust(group_SNV_APE_ivglm$Pvalue, method = "fdr")
+# group_SNV_APE_ivglm_sig = group_SNV_APE_ivglm %>% filter(Est > 0, FDR < 0.05) %>% group_by(PM, load) %>% mutate(n = n()) %>% filter(n > 8)
+
+group_SNV_APE_ivglm_sig = group_SNV_APE_ivglm %>% filter(Est > 0, FDR < 0.05, abs(Zvalue_PM) > 3.16) %>% group_by(PM, load) %>% mutate(n=n()) %>% filter(n>8)
+
+get_groub_sbs_APE_ivglm = function(mat, sbs_APE_glm_sig, PSM_method = "optimal", PSM_ratio = 100, preg_week = F, fdr = T){
+  match.it1 <- matchit(factor(mat$group, levels=c("Healthy", "Tumor"), labels=c(0,1)) ~ age + preg_week + PREFACE, data = mat, 
+                       method = PSM_method, ratio = PSM_ratio)
+  matM1 <- match.data(match.it1)[1:ncol(mat)]
+  
+  dat1 = matM1
+  dat1$group = factor(dat1$group, levels = c("Healthy", "Tumor"), labels = c(0, 1))
+  dat1$group = as.numeric(as.character(dat1$group))
+  colnames(dat1) = gsub("_exposure_day", "", colnames(dat1))
+  
+  for(x in grep("SBS", colnames(dat1), v=T)){
+    dat1[, paste0(x, "_status")] = ifelse(dat1[, x] > 0, 1, 0)
+  }
+  
+  group_sbs_APE_ivglm = lapply(1:nrow(sbs_APE_glm_sig), function(x){
+    # data = dat1[, c(paste0(sbs_APE_glm_sig$signature[x], "_status"), "PM2.5", "PM10", "NO2", "O3_8h", "group", "age", "preg_week", "PREFACE")]
+    data = dat1[, c(sbs_APE_glm_sig$signature[x], "PM2.5", "PM10", "NO2", "O3_8h", "group", "age", "preg_week", "PREFACE")]
+    data[,"PM"] = scale(data[, sbs_APE_glm_sig$pollutant[x]])
+    colnames(data)[1] = "signature"
+    data$signature = scale(data$signature)
+    tryCatch({
+      fitX.LZ <- glm(formula = signature ~ PM + age + preg_week + PREFACE, family="gaussian", data=data)
+      fitY.LX <- glm(formula = group ~ signature+ age + preg_week + PREFACE, family="binomial", data=data)
+      fitIV <- ivglm(estmethod="ts", fitX.LZ = fitX.LZ, fitY.LX = fitY.LX, data=data, ctrl=TRUE)
+      coef1 = as.data.frame(coef(summary(fitX.LZ)))["PM", ]
+      colnames(coef1) = c("Est_PM","SE_PM", "Zvalue_PM", "Pvalue_PM")
+      coef <- summary(fitIV)
+      coef = as.data.frame(coef$coefficients, stringsAsFactors=F)["signature", ]
+      colnames(coef) = c("Est","SE", "Zvalue", "Pvalue")
+      coef = cbind(coef, coef1)
+      coef$PM = sbs_APE_glm_sig$pollutant[x]
+      coef$signature = sbs_APE_glm_sig$signature[x]
+      coef$type = rownames(coef)
+      return(coef)
+    }, error = function(e) {
+        # 发生错误时返回NULL
+        message("Error in analysis: ", e$message)
+        return(NULL)
+      })
+  })
+  group_sbs_APE_ivglm = do.call(rbind, group_sbs_APE_ivglm)
+  group_sbs_APE_ivglm$OR = exp(group_sbs_APE_ivglm$Est)
+  rownames(group_sbs_APE_ivglm) = NULL
+  
+  group_sbs_APE_ivglm = group_sbs_APE_ivglm %>% filter(type == "signature") %>% mutate(FDR = p.adjust(Pvalue, method="fdr"))
+  return(group_sbs_APE_ivglm)
+}
+
+group_sbs_APE_ivglm = mclapply(c(1:10), function(x){
+  res = get_groub_sbs_APE_ivglm(mat, sbs_APE_glm_sig, PSM_method = "optimal", PSM_ratio = x, preg_week = T, fdr = F)
+  res$PSM_ratio = x
+  return(res)
+}, mc.cores = 10)
+
+group_sbs_APE_ivglm = do.call(rbind, group_sbs_APE_ivglm)
+group_sbs_APE_ivglm$FDR = p.adjust(group_sbs_APE_ivglm$Pvalue, method = "fdr")
+
+group_sbs_APE_ivglm_sig = group_sbs_APE_ivglm %>% filter(Est > 0, FDR < 0.05, abs(Zvalue_PM) > 3.16) %>% group_by(PM, signature) %>% mutate(n=n()) %>% filter(n>8)
+
+write.table(data.table::rbindlist(list(group_SNV_APE_ivglm, group_sbs_APE_ivglm), use.names = F), 
+            file = paste0(path, "/tableS9.APE_ivglm.all.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+APE_ivglm_sig = data.table::rbindlist(list(group_SNV_APE_ivglm_sig, group_sbs_APE_ivglm_sig), use.names = F)
+
+write.table(APE_ivglm_sig, file = paste0(path, "/tableS9.APE_ivglm_sig.all.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+write.table(APE_ivglm_sig %>% group_by(load, PM) %>% slice_min(Est), 
+            file = paste0(path, "/table2.APE_ivglm_sig_min.tsv"), r = F, c = T, sep = "\t", quote = F)
+```
+
+## MGSA gene_mutation vs. panCancer
+
+### MGSA gene_mutation QTLs
+
+```{r}
+files <- grep("EUR", list.files("~/Projects/MGSA", pattern = "*txt*", recursive = T, full.names = T), v = T)
+
+lapply(grep("gene_mutation", files, v = T), function(x){
+    print(x)
+    dat <- fread(x, header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>% as.data.frame
+    dat$BETA = log(dat$OR)
+    exposure_dats <- format_data(
+        dat,
+        type = "exposure",
+        snp_col = "SNP",
+        beta_col = "BETA",
+        se_col = "SE",
+        effect_allele_col = "A1",
+        other_allele_col = "A2",
+        eaf_col = "MAF_wildtype",
+        pval_col = "P",
+        phenotype_col = "Somatic_type",
+        chr_col = "CHR",
+        pos_col = "Position_hg19",
+        gene_col = "MAF_mut"
+    ) %>%
+    mutate(id.exposure = exposure)
+    colnames(exposure_dats)[grep("gene", colnames(exposure_dats))] = "MAF_mut"
+    colnames(exposure_dats)[grep("eaf", colnames(exposure_dats))] = "MAF_wt"
+    saveRDS(exposure_dats, file = gsub(".txt.gz", ".MRformat.rds", x))
+
+    exposure_dats = readRDS(gsub(".txt.gz", ".MRformat.rds", x))
+
+    bfile="~/Projects//msQTL_MR/references/1kg_pop/EUR"
+    pop = "EUR"
+
+    snps_to_keep <- exposure_dats %>%
+        dplyr::select(rsid = SNP, pval = pval.exposure, id = exposure) %>%
+        ieugwasr::ld_clump(plink_bin = genetics.binaRies::get_plink_binary(),
+                        bfile = bfile,
+                        pop = pop,
+                        clump_p = 1,
+                        clump_r2 = 0.001,
+                        clump_kb = 10000)
+    exp_clumped <- merge(exposure_dats, snps_to_keep, by.x = c("SNP", "pval.exposure", "exposure"), by.y = c("rsid", "pval", "id"))
+    saveRDS(exp_clumped, file = gsub(".txt.gz", ".MRformat_clumped.rds", x))
+})
+
+
+files <- grep("EAS", list.files("~/Projects/MGSA", pattern = "*txt*", recursive = T, full.names = T), v = T)
+
+lapply(grep("gene_mutation", files, v = T), function(x){
+    print(x)
+    dat <- fread(x, header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>% as.data.frame
+    dat$BETA = log(dat$OR)
+    exposure_dats <- format_data(
+        dat,
+        type = "exposure",
+        snp_col = "SNP",
+        beta_col = "BETA",
+        se_col = "SE",
+        effect_allele_col = "A1",
+        other_allele_col = "A2",
+        eaf_col = "MAF_wildtype",
+        pval_col = "P",
+        phenotype_col = "Somatic_type",
+        chr_col = "CHR",
+        pos_col = "Position_hg19",
+        gene_col = "MAF_mut"
+    ) %>%
+    mutate(id.exposure = exposure)
+    colnames(exposure_dats)[grep("gene", colnames(exposure_dats))] = "MAF_mut"
+    colnames(exposure_dats)[grep("eaf", colnames(exposure_dats))] = "MAF_wt"
+    saveRDS(exposure_dats, file = gsub(".txt", ".MRformat.rds", x))
+
+    exposure_dats = readRDS(gsub(".txt", ".MRformat.rds", x))
+
+    bfile="~/Projects//msQTL_MR/references/1kg_pop/EAS"
+    pop = "EAS"
+
+    snps_to_keep <- exposure_dats %>%
+        dplyr::select(rsid = SNP, pval = pval.exposure, id = exposure) %>%
+        ieugwasr::ld_clump(plink_bin = genetics.binaRies::get_plink_binary(),
+                        bfile = bfile,
+                        pop = pop,
+                        clump_p = 1e-3,
+                        clump_r2 = 0.001,
+                        clump_kb = 10000)
+    exp_clumped <- merge(exposure_dats, snps_to_keep, by.x = c("SNP", "pval.exposure", "exposure"), by.y = c("rsid", "pval", "id"))
+    saveRDS(exp_clumped, file = gsub(".txt", ".MRformat_clumped.rds", x))
+})
+
+
+load("/share/data2/TCGA/The_Immune_Landscape_of_Cancer/mc3.v0.2.8.PUBLIC.maf.RData")
+maf0 = maf
+maf = maf[maf$Variant_Classification %in% c("Missense_Mutation","Nonsense_Mutation","Nonstop_Mutation","Splice_Site","Frame_Shift_Del","Frame_Shift_Ins","In_Frame_Del","In_Frame_Ins"), ]
+maf$Sample = substr(maf$Tumor_Sample_Barcode, 1, 12)
+
+pop_mat = read.table("pop.tsv", header = T , sep = "\t", stringsAsFactors = F)
+
+load("/share/data2/TCGA/The_Immune_Landscape_of_Cancer/TCGA-Clinical-Data-Resource.RData")
+clin$pop = pop_mat$consensus_ancestry[match(clin$bcr_patient_barcode, pop_mat$patient)]
+clin = clin[clin$bcr_patient_barcode %in% maf$Sample, ]
+
+pop = "EUR" #EAS
+
+clin = clin[which(clin$pop == tolower(pop)), ]
+
+maf = maf[which(maf$Sample %in% clin$bcr_patient_barcode), ]
+a = unique(maf[, c("Tumor_Sample_Barcode", "Sample")]) %>% group_by(Sample) %>% mutate(n = n()) %>% 
+  filter(n==1 | (n>1 & substr(Tumor_Sample_Barcode, 14, 15) == "01"))
+
+maf = maf[which(maf$Tumor_Sample_Barcode %in% a$Tumor_Sample_Barcode), ]
+
+gene_mat = table(maf$Sample, maf$Hugo_Symbol)
+gene_mat = gene_mat[clin$bcr_patient_barcode, ]
+gene_mat[gene_mat > 0] = "mut"
+gene_mat[gene_mat == 0] = "wt"
+
+mat = lapply(colnames(gene_mat), function(x){
+  m = as.data.frame.matrix(table(clin$type, gene_mat[, x]))
+  return(m)
+})
+names(mat) = colnames(gene_mat)
+
+
+files = list.files(paste0("gene_mutation/", pop), pattern = "*.rds", full.names = T)
+
+for(f in files){
+  exposure_dats = readRDS(f)
+  genes = gsub("_mutation", "", exposure_dats$exposure)
+
+  cancer = sub(".*_(.*?)\\.MRformat.*", "\\1", basename(f))
+
+  exposure_dats$eaf.exposure <- mapply(function(gene, maf_mut, maf_wt) {
+    mut <- mat[[gene]][cancer, "mut"]
+    wt  <- mat[[gene]][cancer, "wt"]
+    (mut * maf_mut + wt * maf_wt) / (mut + wt)
+  }, gene = genes, maf_mut = exposure_dats$MAF_mut, maf_wt = exposure_dats$MAF_wt, SIMPLIFY = TRUE)
+
+  saveRDS(exposure_dats, file = gsub("MRformat", "MRformat_addEAF", f))
+}
+
+dat = lapply(list.files(paste0("gene_mutation/", pop), pattern="*MRformat_addEAF.rds",full.names=T), function(x){
+  dat = readRDS(x)
+  dat$exposure = paste(sub(paste0(".*Results_", pop, "_([^.]+)\\.MRformat.*"), "\\1", x), dat$exposure, sep = "_")
+  dat$id.exposure = dat$exposure
+  return(dat)
+}) %>% bind_rows()
+
+dat$Cancer = str_split(dat$exposure, pattern="_",simplify=T)[, 1]
+
+if(pop == "EUR"){
+  cancer_counts <- c(
+    ACC = 77, BLCA = 326, BRCA = 703, CESC = 171, CHOL = 29, COAD = 311, DLBC = 19, ESCA = 122, GBM = 326,
+    HNSC = 403, KICH = 56, KIRC = 285, KIRP = 198, LAML = 120, LGG = 439, LIHC = 169, LUAD = 442, LUSC = 439,
+    MESO = 78, OV = 355, PAAD = 143, PCPG = 145, PRAD = 404, READ = 119, SARC = 197, SKCM = 444, STAD = 270,
+    TGCT = 100, THCA = 348, THYM = 92, UCEC = 360, UCS = 42, UVM = 80)
+}else{
+  cancer_counts = table(clin$type)
+}
+
+dat$samplesize.exposure = cancer_counts[dat$Cancer]
+
+saveRDS(dat, file = paste0("MGSA_geneMut_", pop, "_MRformat.rds"))
+
+dat = lapply(list.files(paste0("gene_mutation/", pop), pattern="*MRformat_addEAF_clumped.rds",full.names=T), function(x){
+  dat = readRDS(x)
+  dat$exposure = paste(sub(paste0(".*Results_", pop, "_([^.]+)\\.MRformat.*"), "\\1", x), dat$exposure, sep = "_")
+  dat$id.exposure = dat$exposure
+  return(dat)
+}) %>% bind_rows()
+
+dat$Cancer = str_split(dat$exposure, pattern="_",simplify=T)[, 1]
+dat$samplesize.exposure = cancer_counts[dat$Cancer]
+
+saveRDS(dat, file = paste0("MGSA_geneMut_", pop, "_MRformat_clumped.rds"))
+```
+
+### MGSA gene_mutation ➜ panCancer
+
+```{r}
+library(gwasvcf)
+library(gwasglue)
+library(TwoSampleMR)
+library(mr.raps)
+library(ieugwasr)
+library(tidyverse)
+library(ggplot2)
+library(purrr)
+library(data.table)
+
+source("~/Projects/msQTL_MR/functions.R")
+set_bcftools("/share/apps/bcftools/v1.21/bin/bcftools")  
+set_plink("/share/apps/plink/1.9beta/plink")
+
+info = read.table("~/Projects/msQTL_MR/openGWAS_vcfs/meta1.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+outcome_ids <- setdiff(info$GWAS.ID[info$pop == "EUR"], c("ieu-b-4980", "ieu-b-5086"))
+
+# outcome_ids <- setdiff(info$GWAS.ID[info$pop == "EAS"], c("ieu-b-4980", "ieu-b-5086"))
+
+pop = "EUR"
+# pop = "EAS"
+
+bfile = paste0("~/Projects//msQTL_MR/references/1kg_pop/", pop)
+
+load(paste0("~/Projects/msQTL_MR/", pop, "/msQTL_panCancer/MGSA_gene_muation/run_exposure_outcome_clumped_dats.RData"))
+
+exposure_dats$gene = str_split(exposure_dats$exposure, pattern="_", simplify=T)[,2]
+
+exposure_dats_filtered <- exposure_dats %>%
+  group_by(exposure) %>%
+  group_split() %>%
+  setNames(unique(exposure_dats$exposure)) %>%
+  map(~ filter_exposure_dat_F(.x, default_p = 5e-8, min_snps = 5, alt_thresholds = c(1e-7, 5e-7, 1e-6, 5e-6, 1e-5))) %>%
+  bind_rows()
+
+exposure_ids <- unique(exposure_dats_filtered$exposure)
+
+id_list <- expand.grid(
+  exposure_id = exposure_ids,
+  outcome_id = outcome_ids,
+  stringsAsFactors = FALSE
+)
+
+id_list$cancer = str_split(id_list$exposure_id, pattern = "_", simplify = T)[, 1]
+id_list$type = info$type[match(id_list$outcome_id, info$GWAS.ID)]
+
+id_list = rbind(id_list %>% filter(cancer == type),
+  id_list %>% filter(grepl("KIRC", type), cancer == "KIRC"))
+
+res_MR = mclapply(1:nrow(id_list), function(x){
+    print(id_list[x, ])
+    outcome_id = id_list$outcome_id[x]
+    exposure_id = id_list$exposure_id[x]
+    outcome_dat <- outcome_dats[outcome_dats$id.outcome == outcome_id, ]
+    exposure_dat <- exposure_dats_filtered[exposure_dats_filtered$id.exposure == exposure_id, ]
+    return(run_MR(exposure_dat, outcome_dat, nsnp_min = 3))
+}, mc.cores = 30)
+
+res_MR <- res_MR %>% compact()
+
+mr_combined <- bind_rows(lapply(res_MR, function(x) x$combined))
+harmonized_dat <- bind_rows(lapply(res_MR, function(x) x$harmonized_data))
+
+library(dplyr)
+library(purrr)
+
+filtered_results <- map2(res_MR, seq_along(res_MR), function(res, idx) {
+  message("➡️ Processing MR result for exposure/outcome pair: ", idx)
+  comb <- res$combined
+  presso <- res$presso[[1]]
+  dir_ok <- res$directionality$correct_causal_direction %||% NA
+  # PRESSO global test p-value
+  presso_p <- if (!is.null(presso) && !is.null(presso$`MR-PRESSO results`$`Global Test`$Pvalue)) {
+    as.numeric(gsub("<","", presso$`MR-PRESSO results`$`Global Test`$Pvalue))
+  } else NA_real_
+  
+  comb %>%
+    mutate(
+      id_row = idx,
+      presso_global_pval = presso_p,
+      correct_causal_direction = dir_ok
+    ) %>%
+    filter(
+      Method == "Inverse variance weighted",
+      fdr < 0.05,                    
+      (is.na(Q_pval) | Q_pval > 0.05),    
+      (is.na(intercept_pval) | intercept_pval > 0.05),  
+      (is.na(presso_global_pval) | presso_global_pval > 1e-6),
+      (is.na(correct_causal_direction) | correct_causal_direction == TRUE)
+    )
+}) %>% bind_rows()
+
+supporting <- map2(res_MR, seq_along(res_MR), function(res, idx) {
+  ivw <- filtered_results %>% filter(id_row == idx)
+  if (nrow(ivw) == 0) return(NULL)
+  ivw_effect <- ivw$b[1]
+  
+  res$combined %>%
+    filter(id.exposure == ivw$id.exposure[1],
+           id.outcome == ivw$id.outcome[1],
+           Method %in% c("MR Egger", "Weighted median", "Simple mode", "Weighted mode")) %>%
+    mutate(
+      id_row = idx,
+      ivw_b = ivw_effect,
+      direction_consistent = sign(b) == sign(ivw_effect),  
+      significant = fdr < 0.05 
+    )
+}) %>% compact() %>% bind_rows()
+
+support_summary <- supporting %>%
+  group_by(id_row) %>%
+  summarise(
+    n_methods = n(),
+    n_consistent = sum(direction_consistent),
+    n_significant = sum(direction_consistent & significant),
+    .groups = "drop"
+  )
+
+filtered_results <- filtered_results %>%
+  left_join(support_summary, by = "id_row") %>%
+  mutate(
+    n_methods = replace_na(n_methods, 0),
+    n_consistent = replace_na(n_consistent, 0),
+    n_significant = replace_na(n_significant, 0),
+    is_strong_supported = n_significant >= 1  
+  )
+
+save(res_MR, mr_combined, harmonized_dat, filtered_results, supporting, file = "panCancer_msQTL_MGSA_geneMut.RData")
+
+
+library(TwoSampleMR)
+library(ggpubr)
+library(purrr)
+library(ggplot2)
+library(stringr)
+
+
+dir.create("MR_plots", showWarnings = FALSE)
+
+purrr::walk(seq_len(nrow(filtered_results)), function(i) {
+  row <- filtered_results[i, ]
+  idx <- row$id_row
+  exp <- clean_filename(row$exposure)
+  out <- clean_filename(row$outcome)
+  plots <- plot_mr_result(res_MR[[idx]])
+
+  if (length(plots) == 0) {
+    message("⚠️ No plots for ", exp, " → ", out)
+    return()
+  }
+
+  message("📊 Exporting plots: ", exp, " → ", out)
+
+  outdir <- file.path("MR_plots", paste0("MR_", exp, "_", out))
+  dir.create(outdir, showWarnings = FALSE)
+  plot_types <- names(plots)
+  walk2(plots, plot_types, function(p, type) {
+    if(type == "forest"){
+      walk(seq_len(length(p)), function(i) {
+        dims <- list(
+          width = attr(p[[i]], "width"),
+          height = attr(p[[i]], "height")
+        )
+        pdf_file <- file.path(outdir, paste0(type, "_", i, ".pdf"))
+        ggsave(pdf_file, plot = p[[i]], width = dims$width, height = dims$height)
+      })
+    }else {
+      dims <- list(
+        width = attr(p, "width"),
+        height = attr(p, "height")
+      )
+      pdf_file <- file.path(outdir, paste0(type, ".pdf"))
+      ggsave(pdf_file, plot = p, width = dims$width, height = dims$height)
+    }
+  })
+})
+
+########### Forest Plot
+
+filtered_results$cancer = str_split(filtered_results$exposure, pattern = "_", simplify = T)[, 1]
+save_all_forest_plots(filtered_results)
+```
+
+### panCancer -> MGSA gene_mutation
+
+```{r}
+load("~/Projects/msQTL_MR/EUR/msQTL_panCancer/MGSA_gene_muation/run_exposure_outcome_clumped_dats.RData")
+
+bfile = "~/Projects//msQTL_MR/references/1kg_pop/EUR"
+pop = "EUR"
+
+exposure_dats_filtered <- exposure_dats %>%
+  group_by(exposure) %>%
+  group_split() %>%
+  setNames(unique(exposure_dats$exposure)) %>%
+  map(~ filter_exposure_dat_F(.x, default_p = 5e-8, min_snps = 5, alt_thresholds = c(1e-7, 5e-7, 1e-6, 5e-6, 1e-5))) %>%
+  bind_rows()
+
+exposure_ids <- unique(exposure_dats_filtered$id.exposure)
+
+outcome_ids = unique(outcome_dats$outcome)
+
+id_list <- expand.grid(
+  exposure_id = exposure_ids,
+  outcome_id = outcome_ids,
+  stringsAsFactors = FALSE
+)
+
+id_list$cancer = str_split(id_list$outcome_id, pattern = "_", simplify = T)[, 1]
+id_list$type = info$type[match(id_list$exposure_id, info$GWAS.ID)]
+
+id_list = rbind(id_list %>% filter(cancer == type),
+  id_list %>% filter(grepl("KIRC", type), cancer == "KIRC"))
+
+res_MR = mclapply(1:nrow(id_list), function(x){
+    print(id_list[x, ])
+    outcome_id = id_list$outcome_id[x]
+    exposure_id = id_list$exposure_id[x]
+    outcome_dat <- outcome_dats[grep(outcome_id, outcome_dats$outcome), ]
+    exposure_dat <- exposure_dats_filtered[exposure_dats_filtered$id.exposure == exposure_id, ]
+    return(run_MR(exposure_dat, outcome_dat, nsnp_min = 3))
+}, mc.cores = 30)
+```
+
+## Table S10-S12
+
+```{r}
+load("geneMat.RData")
+gene_mat = gene_mat[mat$ID, ]
+gene_mat[gene_mat > 0] = 1
+
+CTD_chem_gene_ixns = fread("Comparative_Toxicogenomics_Database/CTD_chem_gene_ixns.tsv.gz", header = F, sep = "\t", stringsAsFactors = F) %>%
+  filter(V1 %in% c("Ozone", "Particulate Matter", "Nitrogen Oxides", "Sulfur Dioxide", "aristolochic acid I", "aristolochic acid II"))
+
+CTD_curated_genes_diseases = fread("Comparative_Toxicogenomics_Database/CTD_curated_genes_diseases.tsv.gz", header = F, sep = "\t", stringsAsFactors = F)
+
+gene_sbs_list_ivglm <- expand.grid(
+  snv = unique(APE_ivglm_sig$load),
+  gene = names(which(colSums(gene_mat > 0) > 5)),
+  stringsAsFactors = FALSE
+  )
+
+res_gene_sbs_glm_ivglm = mclapply(1:nrow(gene_sbs_list_ivglm), function(x){
+    message(x)
+    dat = cbind(gene = gene_mat[, gene_sbs_list_ivglm$gene[x]], mat[, c("age", "preg_week", "PREFACE")], snv = mat[, gene_sbs_list_ivglm$snv[x]])
+    dat$snv = scale(dat$snv)
+    fit = glm(gene ~ ., data = dat, family = binomial)
+    coefs = coef(summary(fit))
+    ci <- confint(fit)
+    res = as.data.frame(cbind(coefs, ci))
+    colnames(res) = c("Estimate", "StdError", "Zvalue", "Pvalue", "CI_lower", "CI_upper")
+    res = res["snv", ]
+    res$var = gene_sbs_list_ivglm$snv[x]
+    res$gene = gene_sbs_list_ivglm$gene[x]
+    return(res)
+  }, mc.cores = 30)
+
+res_gene_sbs_glm_ivglm = do.call(rbind, res_gene_sbs_glm_ivglm)
+rownames(res_gene_sbs_glm_ivglm) = NULL
+res_gene_sbs_glm_ivglm = res_gene_sbs_glm_ivglm %>% group_by(var) %>% mutate(fdr = p.adjust(Pvalue, method = "fdr"))
+
+write.table(res_gene_sbs_glm_ivglm, file = paste0(path, "/tableS10.res_gene_sbs_glm_ivglm.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+
+############# cancer ~ gene
+res_gene_cancer_glm = mclapply(names(which(colSums(gene_mat>0) > 5)), function(x){
+    message(x)
+    dat = cbind(gene = gene_mat[, x], mat[, c("age", "preg_week", "PREFACE")], group = ifelse(mat$group == "Healthy", 0, 1))
+    fit = glm(group ~ ., data = dat, family = binomial)
+    coefs = coef(summary(fit))
+    ci <- confint(fit)
+    res = as.data.frame(cbind(coefs, ci))
+    colnames(res) = c("Estimate", "StdError", "Zvalue", "Pvalue", "CI_lower", "CI_upper")
+    res = res["gene", ]
+    res$gene = x
+    return(res)
+  }, mc.cores = 50)
+
+res_gene_cancer_glm = do.call(rbind, res_gene_cancer_glm)
+rownames(res_gene_cancer_glm) = NULL
+res_gene_cancer_glm = res_gene_cancer_glm %>% mutate(fdr = p.adjust(Pvalue, method = "fdr")) 
+
+write.table(res_gene_cancer_glm, file = paste0(path, "/tableS11.res_gene_cancer_glm.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+save.image(file = paste0(path, "/run.RData"))
+
+cosmic_census = read.table("Census_allThu Dec 25 11_39_44 2025.tsv", header=T,sep="\t",stringsAsFactors=F)
+
+load("~/Projects//msQTL_MR/EUR/msQTL_panCancer/MGSA_gene_muation_F/panCancer_msQTL_MGSA_geneMut.RData")
+filtered_results_EUR = filtered_results
+filtered_results_EUR$gene = str_split(filtered_results_EUR %>% pull(exposure), pattern = "_", simplify = T)[, 2]
+filtered_results_EUR$cancer = str_split(filtered_results_EUR %>% pull(exposure), pattern = "_", simplify = T)[, 1]
+
+load("~/Projects//msQTL_MR/EAS/msQTL_panCancer/MGSA_gene_muation_F/panCancer_msQTL_MGSA_geneMut.RData")
+filtered_results_EAS = filtered_results
+filtered_results_EAS$gene = str_split(filtered_results_EAS %>% pull(exposure), pattern = "_", simplify = T)[, 2]
+filtered_results_EAS$cancer = str_split(filtered_results_EAS %>% pull(exposure), pattern = "_", simplify = T)[, 1]
+
+genes1 = res_gene_sbs_glm_ivglm %>% filter(Estimate > 0, fdr < 0.05) %>% pull(gene) %>% unique
+
+genes2 = res_gene_cancer_glm %>% filter(Estimate > 0, fdr < 0.05) %>% pull(gene) %>% unique
+
+genes = intersect(genes1, genes2)
+
+res_gene_sbs_glm_ivglm_sig = res_gene_sbs_glm_ivglm %>% filter(Estimate > 0, fdr < 0.05, gene %in% genes)
+
+write.table(res_gene_sbs_glm_ivglm_sig, file = paste0(path, "/tableS10.res_gene_sbs_glm_ivglm.cancer_sig.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+res_gene_sbs_glm_ivreg_sig = res_gene_sbs_glm_ivreg %>% filter(Estimate > 0, fdr1 < 0.05, gene %in% intersect(genes1_ivreg, genes2))
+
+
+causal_genes = rbind(res_gene_sbs_glm_ivglm_sig %>% filter(gene %in% filtered_results_EUR$gene) %>% mutate(MR_pop = "EUR"),
+      res_gene_sbs_glm_ivglm_sig %>% filter(gene %in% filtered_results_EAS$gene) %>% mutate(MR_pop = "EAS")) %>%
+  group_by(var, gene) %>% mutate(MR_pop = paste(sort(MR_pop), collapse = ",")) %>% unique
+
+causal_genes = merge(causal_genes, cosmic_census[, c("Gene.Symbol", "Tier")], by.x = "gene", by.y = "Gene.Symbol", all.x = T) %>%
+  mutate(COSMIC_Tier = Tier) %>% select(-Tier)
+
+causal_genes = merge(causal_genes, APE_ivglm_sig %>% select(PM, load) %>% unique, by.x = "var", by.y = "load")
+
+write.table(causal_genes, file = paste0(path, "/tableS12.causal_genes.tsv"), r = F, c = T, sep = "\t", quote = F)
+
+# degree > 15, between > 1, Steiner Forest Network
+
+###########
+filtered_results_NIPT = rbind(filtered_results_EUR %>% filter(gene %in% genes) %>% group_by(cancer, gene) %>% slice_min(fdr) %>% mutate(pop = "EUR"),
+                              filtered_results_EAS %>% filter(gene %in% genes) %>% group_by(cancer, gene) %>% slice_min(fdr) %>% mutate(pop = "EAS"))
+
+
+# PPI #1F77B4FF  #1f77b4
+# seed gene #FF7F0EFF  #FF7F0E
+```
+
+## Figure 5A and 5B
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+
+df = merge(res_gene_sbs_glm_ivglm, res_gene_cancer_glm, by = "gene") 
+
+df$group <- "Non-significant"
+df$group[df$Estimate.x > 0 & df$fdr.x < 0.05 &
+           df$Estimate.y > 0 & df$fdr.y < 0.05] <- "Both_Positive"
+df$group[df$group == "Non-significant" &
+           ((df$fdr.x < 0.05) | (df$fdr.y < 0.05))] <- "One_Significant"
+df$group1 = df$group
+df$group1[df$group1 == "Both_Positive"] = df$var[df$group1 == "Both_Positive"]
+df$group1 <- factor(df$group1, levels = c("SBS11", "SBS32", "SBS40", "C_G","NonSyn_InDels","One_Significant","Non-significant"))
+
+df$group2 = df$group
+df$group2[df$group == "Both_Positive" & df$gene %in% cosmic_census$Gene.Symbol] = "COSMIC"
+df$group2 <- factor(df$group2, levels = c("Non-significant", "One_Significant", "Both_Positive", "COSMIC"))
+
+df = df %>% filter(var != "SBS7c", Zvalue.y > 0)
+df$var = factor(df$var, levels = c("C_G","NonSyn_InDels","SBS32", "SBS40", "SBS11"))
+
+# 2. Top COSMIC
+label_data <- df %>%
+  filter(group2 == "COSMIC")
+
+# 3. 
+p_zvalue <- ggplot(df, aes(x = Zvalue.x, y = Zvalue.y)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey85") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey85") +
+  ## 1. Non-significant：
+  geom_point(
+    data = subset(df, group2 == "Non-significant"),
+    aes(color = group2),
+    size = 0.8, alpha = 0.3
+  ) +
+  ## 2. One significant
+  geom_point(
+    data = subset(df, group2 == "One_Significant"),
+    aes(color = group2),
+    size = 1.2, alpha = 0.6
+  ) +
+  ## 3. Both positive
+  geom_point(
+    data = subset(df, group2 == "Both_Positive"),
+    aes(color = group2),
+    size = 1.8, alpha = 0.8
+  ) +
+  ## 4. COSMIC：
+  geom_point(
+    data = subset(df, group2 == "COSMIC"),
+    aes(color = group2),
+    size = 1.8, alpha = 0.8
+  ) +
+  geom_text_repel(
+    data = label_data,
+    aes(label = gene),
+    size = 3,
+    box.padding = 0.5,
+    max.overlaps = 20,
+    segment.color = "grey50"
+  ) +
+  facet_grid(~ var, scales = "free", space = "free") +
+  scale_color_manual(
+    name = "",
+    values = c(
+      "Both_Positive"   = "#1F77B4",
+      "COSMIC"          = "#FF7F0E",
+      "One_Significant" = "grey70",
+      "Non-significant" = "grey90"
+    )
+  ) +
+  labs(
+    x = "Association with Cancer Status (Z-value)",
+    y = "Association with Somatic Features (Z-value)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.position = "right"
+  )
+
+
+library(dplyr)
+library(ggplot2)
+
+genes = unique(res_gene_sbs_glm_ivglm_sig$gene)
+
+gene_df <- bitr(genes,
+                fromType = "SYMBOL",
+                toType   = "ENTREZID",
+                OrgDb    = org.Hs.eg.db)
+
+entrez_genes <- gene_df$ENTREZID
+
+kegg_res <- enrichKEGG(
+    gene         = entrez_genes,
+    organism     = "hsa",     
+    pvalueCutoff = 0.05,
+    use_internal_data = T
+)
+
+kegg_plot <- kegg_res@result %>%
+  filter(pvalue < 0.05) %>%
+  mutate(
+    Description = paste(category, subcategory, sep = "\n"),
+    logPadj = -log10(p.adjust)
+  ) %>%
+  group_by(Description) %>%
+  slice_min(pvalue, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(logPadj) %>%
+  mutate(
+    Description = factor(Description, levels = rev(Description))
+  )
+
+p_kegg = ggplot(kegg_plot,
+       aes(y = logPadj,
+           x = Description,
+           size = Count,
+           color = RichFactor)) +
+  geom_point(alpha = 0.8) +
+  scale_color_gradient(low = "#4575B4", high = "#D73027") +
+  labs(
+    y = "-log10(adj.P)",
+    x = "KEGG pathway",
+    color = "Rich factor",
+    size = "Gene count"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 10, angle = -45, hjust = 0, vjust = 1),
+    axis.title = element_text(size = 12),
+    legend.position = "right",
+    legend.box = "horizontal",  
+    legend.box.just = "left",
+    legend.spacing.x = unit(0.5, "cm")
+  )
+
+gene_list <- res_gene_sbs_glm_ivglm_sig %>% group_by(var) %>% summarise(list =list(gene)) %>% pull(list)
+names(gene_list) = res_gene_sbs_glm_ivglm_sig %>% group_by(var) %>% dplyr::select(var) %>% table %>% names
+
+library(UpSetR)
+library(ggplot2)
+library(cowplot)
+library(grid)
+
+upset_grob = grid.grabExpr(
+  upset(fromList(gene_list),
+      order.by = "freq",
+      keep.order = TRUE,
+      main.bar.color = "steelblue",
+      sets.bar.color = "darkorange",
+      text.scale = c(2, 2, 1.5, 1.5, 1.5, 1.5))
+  )
+
+p_upset <- upset(
+  fromList(gene_list),
+  intersect = names(gene_list),
+  base_annotations = list(
+    'Intersection size' = intersection_size()
+  )
+)
+
+pdf(width = 14, height = 12)
+plot_grid(p_zvalue, 
+          plot_grid(p_upset, NULL, rel_widths = c(1, 0.5)),
+          align = "hv", axis = "lr", ncol = 1, labels = c("A", "B"))
+dev.off()
+```
+
+## Forest, Figure S9
+
+```{r}
+library(showtext)
+showtext_auto() 
+
+library(ggplot2)
+library(dplyr)
+library(viridis)
+library(patchwork)
+
+create_single_cancer_forest_plot <- function(data, cancer_type, is_left_column = TRUE) {
+  plot_data <- data %>% 
+    filter(cancer == cancer_type) %>%
+    mutate(
+      label = gene,
+      is_strong_supported = factor(is_strong_supported, 
+                                   levels = c(TRUE, FALSE), 
+                                   labels = c("Strong", "Week")),
+      logFDR = -log10(fdr)
+    )
+  
+  p <- ggplot(plot_data, aes(x = reorder(label, OR), y = OR, ymin = CI_lower, ymax = CI_upper)) +
+    geom_pointrange(aes(color = logFDR, size = nsnp)) +
+    coord_flip() +
+    geom_hline(yintercept = 1, linetype = "dashed") +
+    scale_color_viridis_c(name = "-log10(FDR)", option = "D", direction = 1) +
+    scale_size_continuous(name = "nsnp", range = c(0.1, 1)) +
+    labs(
+      title = cancer_type,
+      x = NULL,
+      y = "Effect Size (OR ± 95%CI)"
+    ) +
+    theme_bw() +
+    theme(
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank(),
+      axis.text = element_text(size = 9),
+      axis.title = element_text(size = 11, face = "bold"),
+      legend.position = "right", 
+      legend.key.size = unit(0.8, "lines"),
+      legend.title = element_text(size = 8),  
+      legend.text = element_text(size = 7),
+      legend.box = "horizontal",  
+      legend.margin = margin(1, 1, 1, 1, "mm"), 
+      legend.spacing.x = unit(2, "mm"),  
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+      plot.margin = margin(0.2, 0.5, 0.2, 0.2, "cm")  
+    )
+  
+  return(list(
+    plot = p,
+    gene_count = nrow(plot_data)
+  ))
+}
+
+create_and_save_column_then_row_plots <- function(data, output_dir = "forest_plots") {
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  left_column <- c("UCEC", "LUSC", "STAD", "LGG")
+  right_column <- c("SKCM", "LUAD", "COAD", "BLCA")
+  
+  left_plots <- list()
+  right_plots <- list()
+  left_gene_counts <- numeric()
+  right_gene_counts <- numeric()
+  
+  for (i in seq_along(left_column)) {
+    cancer <- left_column[i]
+    if (cancer %in% unique(data$cancer)) {
+      result <- create_single_cancer_forest_plot(data, cancer, is_left_column = TRUE)
+      left_plots[[i]] <- result$plot
+      left_gene_counts[i] <- result$gene_count
+      
+      ggsave(
+        file.path(output_dir, paste0("forest_plot_", cancer, ".pdf")),
+        result$plot,
+        width = 11,  
+        height = 2.5 + (result$gene_count * 0.3),
+        limitsize = FALSE
+      )
+      
+    } else {
+      left_plots[[i]] <- ggplot() + theme_void() + 
+        ggtitle(paste("No data for", cancer)) + 
+        theme(plot.title = element_text(hjust = 0.5))
+      left_gene_counts[i] <- 0
+    }
+  }
+  
+  for (i in seq_along(right_column)) {
+    cancer <- right_column[i]
+    if (cancer %in% unique(data$cancer)) {
+      result <- create_single_cancer_forest_plot(data, cancer, is_left_column = FALSE)
+      right_plots[[i]] <- result$plot
+      right_gene_counts[i] <- result$gene_count
+      
+      ggsave(
+        file.path(output_dir, paste0("forest_plot_", cancer, ".pdf")),
+        result$plot,
+        width = 11, 
+        height = 2.5 + (result$gene_count * 0.3),
+        limitsize = FALSE
+      )
+      
+    } else {
+      right_plots[[i]] <- ggplot() + theme_void() + 
+        ggtitle(paste("No data for", cancer)) + 
+        theme(plot.title = element_text(hjust = 0.5))
+      right_gene_counts[i] <- 0
+    }
+  }
+  
+  legend_width_factor <- 1.4
+  
+  total_left_genes <- sum(left_gene_counts)
+  total_right_genes <- sum(right_gene_counts)
+  
+  min_rel_height <- 0.1
+  left_rel_heights <- pmax(left_gene_counts / total_left_genes, 
+                           rep(min_rel_height, length(left_gene_counts)))
+  right_rel_heights <- pmax(right_gene_counts / total_right_genes, 
+                            rep(min_rel_height, length(right_gene_counts)))
+  
+  left_column_plot <- left_plots[[1]] / left_plots[[2]] / left_plots[[3]] / left_plots[[4]] + 
+    plot_layout(heights = left_rel_heights)
+  
+  right_column_plot <- right_plots[[1]] / right_plots[[2]] / right_plots[[3]] / right_plots[[4]] + 
+    plot_layout(heights = right_rel_heights)
+  
+  combined_plot <- left_column_plot | right_column_plot
+  
+  combined_plot <- combined_plot + 
+    plot_annotation(
+      title = "Causal effects of gene mutation status on cancer",
+      theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+    )
+  
+  combined_file <- file.path(output_dir, "combined_forest_plots_by_columns.pdf")
+  
+  total_width <- 10 * legend_width_factor
+  
+  max_genes_column <- max(total_left_genes, total_right_genes)
+  base_height <- 1  
+  gene_height_factor <- 0.12
+  total_height <- base_height + (max_genes_column * gene_height_factor)
+  
+  total_height <- min(50, max(15, total_height))
+  
+  ggsave(
+    combined_file,
+    combined_plot,
+    width = total_width,
+    height = total_height,
+    limitsize = FALSE
+  )
+  
+  for (i in seq_along(left_column)) {
+    cat(sprintf("  %s: %d gene\n", left_column[i], left_gene_counts[i]))
+  }
+  for (i in seq_along(right_column)) {
+    cat(sprintf("  %s: %d gene\n", right_column[i], right_gene_counts[i]))
+  }
+}
+
+create_and_save_column_then_row_plots(filtered_results_NIPT, output_dir = paste0(path, "/forest_plots"))
+```
+
+## Figure 5C
+
+```{r}
+library(ggplot2)
+library(ggalluvial)
+
+plot_sankeyNetwork = function(n_top_gene = NULL, p_heigth = 800, p_width = 1000){
+  a = merge(causal_genes[, c("var", "gene", "MR_pop", "PM")], filtered_results_NIPT[, c("gene", "pop", "cancer")], 
+        by.x = c("gene", "MR_pop"), by.y = c("gene", "pop"))
+  colnames(a) = c("Gene", "Population", "Signature", "Pollutant", "Cancer")
+  a = a %>% arrange(Pollutant, Cancer, Signature)
+
+  a1 = APE_ivglm_sig %>% group_by(load, PM) %>% slice_min(Est) %>% dplyr::select(PM, load, Est) %>% filter(!(load %in% c("SBS11", "SBS7c")))
+  if(!is.null(n_top_gene)){
+      a3 = rbind(filtered_results_NIPT[, c("gene", "cancer", "b")] %>% group_by(cancer) %>% slice_max(abs(b), n=5),
+        filtered_results_NIPT[, c("gene", "cancer", "b")] %>% filter(gene=="NUP98"))
+  }else{
+      a3 = filtered_results_NIPT[, c("gene", "cancer", "b")]
+  }
+  a2 = causal_genes[, c("var", "gene", "Estimate")] %>% filter(gene %in% a3$gene)
+
+  # 1. Pollutant -> Signature
+  l1 <- a %>% filter(Gene %in% a3$gene) %>%
+    group_by(Pollutant, Signature) %>%
+    summarise(Value = n(), .groups = 'drop')
+
+  # 2. Signature -> Gene 的连接次数
+  l2 <- a %>% filter(Gene %in% a3$gene) %>%
+    group_by(Signature, Gene) %>% 
+    summarise(Value = n(), .groups = 'drop') 
+
+  # 3. Gene -> Cancer 的连接次数
+  l3 <- a %>% filter(Gene %in% a3$gene) %>%
+    group_by(Gene, Cancer) %>% 
+    summarise(Value = n(), .groups = 'drop')
+
+  # 4. Cancer -> Population 的连接次数
+  l4 <- a %>% filter(Gene %in% a3$gene) %>%
+    group_by(Cancer, Population) %>%
+    summarise(Value = n(), .groups = 'drop') 
+
+  links = data.table::rbindlist(l=list(l1, l2, l3, l4), use.names = F)
+  colnames(links) = c("source", "target", "Value")
+
+  nodes = data.frame(name = unique(c(links$source, links$target)))
+  nodes$group = "Gene"
+  nodes$group[nodes$name %in%  a1$PM] = "Pollutant"
+  nodes$group[nodes$name %in%  a1$load] = "Somatic"
+  nodes$group[nodes$name %in%  a3$cancer] = "Cancer"
+  nodes$group[nodes$name %in%  a$Population] = "Population"
+  nodes$name = gsub("O3_8h", "Ozone", nodes$name)
+
+  links$source = gsub("O3_8h", "Ozone", links$source)
+  links$target = gsub("O3_8h", "Ozone", links$target)
+
+  nodes$name = gsub("C_G", "C>G", nodes$name)
+  links$source = gsub("C_G", "C>G", links$source)
+  links$target = gsub("C_G", "C>G", links$target)
+
+  l = a %>% filter(Gene %in% a3$gene) %>% group_by(Cancer) %>% mutate(n=n()) %>% arrange(desc(Pollutant), desc(Signature), desc(n), desc(Cancer)) %>% unlist %>% unique
+
+  l = gsub("C_G", "C>G", l)
+  l = gsub("O3_8h", "Ozone", l)
+  nodes$name = factor(nodes$name, levels = l)
+  nodes = nodes %>% arrange(name)
+
+  links$IDsource <- match(links$source, nodes$name) - 1
+  links$IDtarget <- match(links$target, nodes$name) - 1
+  links$source_group = nodes$group[match(links$source, nodes$name)]
+  links$target_group = nodes$group[match(links$target, nodes$name)]
+
+  my_color <- 'd3.scaleOrdinal() .domain(["Pollutant", "Somatic", "Gene", "Cancer", "Population"]) .range(["#1F77B4FF", "#FF7F0EFF", "#2CA02CFF", "#D62728FF", "#7F7F7F"])'
+
+  return(sankeyNetwork(Links = links, Nodes = nodes,
+            Source = "IDsource", Target = "IDtarget",
+            Value = "Value",
+            NodeID = "name",
+            NodeGroup = "group",
+            fontSize = 20, 
+            nodeWidth = 20,
+            sinksRight = FALSE,
+            iterations = 0,
+            colourScale=my_color,
+            width = p_width, 
+            height = p_heigth))
+}
+
+saveNetwork(plot_sankeyNetwork(n_top_gene = 5, p_heigth = 800, p_width = 1000),
+              "sankeyNetwork.html", selfcontained = FALSE)
+
+saveNetwork(plot_sankeyNetwork(n_top_gene = NULL, p_heigth = 2000, p_width = 2000),
+              "sankeyNetwork_all.html", selfcontained = FALSE)
+```
